@@ -1,0 +1,39 @@
+<svg width="500" height="500" viewBox="90 90 500 500" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>FastTask app icon</title>
+  <desc>Graffiti-style ultra-fat italic FT monogram on Catppuccin Mauve rounded square</desc>
+
+  <rect x="90" y="90" width="500" height="500" rx="110" fill="#cba6f7"/>
+
+  <!-- Speed streaks -->
+  <line x1="90" y1="185" x2="172" y2="185" stroke="#1e1e2e" stroke-width="4" stroke-linecap="round" opacity="0.12"/>
+  <line x1="90" y1="210" x2="172" y2="210" stroke="#1e1e2e" stroke-width="6" stroke-linecap="round" opacity="0.18"/>
+  <line x1="90" y1="237" x2="172" y2="237" stroke="#1e1e2e" stroke-width="9" stroke-linecap="round" opacity="0.28"/>
+  <line x1="90" y1="265" x2="172" y2="265" stroke="#1e1e2e" stroke-width="12" stroke-linecap="round" opacity="0.40"/>
+  <line x1="90" y1="294" x2="172" y2="294" stroke="#1e1e2e" stroke-width="15" stroke-linecap="round" opacity="0.52"/>
+  <line x1="90" y1="324" x2="172" y2="324" stroke="#1e1e2e" stroke-width="17" stroke-linecap="round" opacity="0.58"/>
+  <line x1="90" y1="355" x2="172" y2="355" stroke="#1e1e2e" stroke-width="17" stroke-linecap="round" opacity="0.58"/>
+  <line x1="90" y1="385" x2="172" y2="385" stroke="#1e1e2e" stroke-width="15" stroke-linecap="round" opacity="0.46"/>
+  <line x1="90" y1="413" x2="172" y2="413" stroke="#1e1e2e" stroke-width="12" stroke-linecap="round" opacity="0.32"/>
+  <line x1="90" y1="440" x2="172" y2="440" stroke="#1e1e2e" stroke-width="8" stroke-linecap="round" opacity="0.20"/>
+  <line x1="96" y1="464" x2="172" y2="464" stroke="#1e1e2e" stroke-width="5" stroke-linecap="round" opacity="0.12"/>
+  <line x1="110" y1="486" x2="172" y2="486" stroke="#1e1e2e" stroke-width="3" stroke-linecap="round" opacity="0.08"/>
+
+  <g transform="translate(340,340) skewX(-14) translate(-340,-340)">
+
+    <!-- T — behind, lower, slightly smaller -->
+    <rect x="278" y="242" width="232" height="78" rx="12" fill="#1e1e2e"/>
+    <rect x="278" y="304" width="232" height="16" rx="6" fill="#fab387" opacity="0.70"/>
+    <rect x="355" y="242" width="78" height="286" rx="12" fill="#1e1e2e"/>
+    <rect x="415" y="320" width="18" height="208" rx="6" fill="#a6e3a1" opacity="0.72"/>
+
+    <!-- F — in front -->
+    <rect x="172" y="178" width="88" height="322" rx="12" fill="#1e1e2e"/>
+    <rect x="242" y="178" width="18" height="322" rx="6" fill="#fab387" opacity="0.75"/>
+    <rect x="172" y="178" width="236" height="78" rx="12" fill="#1e1e2e"/>
+    <rect x="260" y="242" width="148" height="16" rx="6" fill="#89dceb" opacity="0.68"/>
+    <rect x="172" y="322" width="178" height="74" rx="12" fill="#1e1e2e"/>
+    <rect x="260" y="382" width="90" height="16" rx="6" fill="#89dceb" opacity="0.68"/>
+    <rect x="256" y="178" width="14" height="322" rx="4" fill="#1e1e2e" opacity="0.28"/>
+
+  </g>
+</svg>
