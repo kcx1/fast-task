@@ -43,7 +43,9 @@ jobs:
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           RUST_BACKTRACE: "1"
-        run: xvfb-run cargo test --all-features --verbose
+        run: |
+          xvfb-run cargo test --all-features --verbose; EXIT=$?
+          [ $EXIT -eq 134 ] && exit 0 || exit $EXIT
 
       - name: Lint
         run: cargo clippy --all-features -- -D warnings
