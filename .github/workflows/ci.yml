@@ -30,7 +30,7 @@ jobs:
             libssl-dev \
             xvfb \
             libgl1-mesa-dri \
-            libegl1-mesa \
+            libegl1 \
             mesa-vulkan-drivers
 
       - name: Add clippy
