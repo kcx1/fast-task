@@ -1,3 +1,6 @@
 /target
 DS.store
-*.md
+todo.md
+plan.md
+.claude/*
+opus-plan-prompt.md
