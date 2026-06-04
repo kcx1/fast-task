@@ -56,5 +56,6 @@ jobs:
           fi
           exit $EXIT
 
+
       - name: Lint
         run: cargo clippy --all-features -- -D warnings
