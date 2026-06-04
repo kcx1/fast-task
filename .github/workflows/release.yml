@@ -21,6 +21,7 @@ jobs:
 
       - name: Update CHANGELOG
         id: changelog
+        continue-on-error: true
         uses: requarks/changelog-action@v1
         with:
           token: ${{ github.token }}
@@ -33,7 +34,7 @@ jobs:
           draft: false
           makeLatest: true
           name: ${{ github.ref_name }}
-          body: ${{ steps.changelog.outputs.changes }}
+          body: ${{ steps.changelog.outputs.changes || 'Initial release.' }}
           token: ${{ github.token }}
 
       - name: Commit CHANGELOG.md
