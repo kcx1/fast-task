@@ -44,7 +44,7 @@ jobs:
           LIBGL_ALWAYS_SOFTWARE: "1"
           RUST_BACKTRACE: "1"
         run: |
-          output=$(xvfb-run cargo test --all-features --verbose 2>&1)
+          output=$(xvfb-run cargo test --color=never --all-features --verbose 2>&1)
           EXIT=$?
           echo "$output"
           # PoloDB 5.x triggers a pthread cleanup crash (SIGABRT) after tests complete.
