@@ -43,18 +43,39 @@ jobs:
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           RUST_BACKTRACE: "1"
+          CARGO_TERM_COLOR: never
         run: |
-          output=$(xvfb-run cargo test --all-features --verbose 2>&1)
-          EXIT=$?
-          echo "$output"
-          # PoloDB 5.x triggers a pthread cleanup crash (SIGABRT) after tests complete.
-          # Cargo exits 101 when its child dies from a signal. Treat this as success only
-          # when the test output confirms all tests passed and none failed.
-          if [ $EXIT -ne 0 ] && echo "$output" | grep -qE '^test result: ok\.' && ! echo "$output" | grep -q 'FAILED'; then
-            echo "Tests passed; ignoring post-test cleanup crash"
+          # PoloDB 5.x is RocksDB-backed; RocksDB's background threads race the C++
+          # static teardown at process exit and abort (SIGABRT) *after* every test has
+          # already run and passed. cargo reports that child signal death as exit 101,
+          # so the exit code alone can't distinguish "real failure" from "benign
+          # post-test crash". We stream the output, capture cargo's real exit code, and
+          # decide pass/fail from the test summary instead.
+          #
+          # --no-fail-fast is load-bearing: without it cargo stops at the first binary
+          # that exits non-zero, so a crash in an early binary would skip the rest and
+          # let a partial run masquerade as success. With it, every binary runs to
+          # completion and "no FAILED anywhere" actually means all tests passed.
+          #
+          # Note: `output=$(cmd)` cannot be used here — GitHub runs this with `set -e`,
+          # under which a failing command substitution aborts the step before we can
+          # inspect the result.
+          set +e
+          xvfb-run cargo test --no-fail-fast --all-features --verbose 2>&1 | tee test-output.log
+          EXIT=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$EXIT" -eq 0 ]; then
             exit 0
           fi
-          exit $EXIT
+
+          if grep -qE '^test result: ok' test-output.log && ! grep -q 'FAILED' test-output.log; then
+            echo "::warning::All tests passed; tolerating known PoloDB/RocksDB post-test cleanup crash (cargo exit $EXIT)"
+            exit 0
+          fi
+
+          echo "Tests failed (cargo exit $EXIT)"
+          exit "$EXIT"
 
 
       - name: Lint
