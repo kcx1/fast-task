@@ -200,9 +200,12 @@ pub fn info_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
                                             .color(colors::SUBTEXT0)
                                             .size(11.0),
                                         );
-                                        if common::secondary_button(ui, "✕")
-                                            .on_hover_text("Delete note")
-                                            .clicked()
+                                        if common::secondary_button(
+                                            ui,
+                                            crate::ui::theme::icons::DISCARD,
+                                        )
+                                        .on_hover_text("Delete note")
+                                        .clicked()
                                         {
                                             to_delete = Some(ann.id);
                                         }
@@ -314,7 +317,6 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
     }
 
     let is_edit = matches!(&app.app_state.mode, Mode::Insert(Some(_)));
-    let ann_input_id = egui::Id::new("editor_annotation_input");
 
     egui::Frame::new()
         .inner_margin(egui::Margin::same(12_i8))
@@ -330,384 +332,295 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
             }
             ui.add_space(8.0);
 
-            // Title
-            common::field_label(ui, "Title");
-            let header = ui.add(
-                egui::TextEdit::singleline(&mut app.task_manager.writer.title_buffer)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("What needs to be done?"),
-            );
+            // Buttons pinned at bottom; scroll area fills the middle.
+            let scroll_h = (ui.available_height() - 64.0).max(100.0);
 
-            ui.add_space(4.0);
+            egui::ScrollArea::vertical()
+                .max_height(scroll_h)
+                .show(ui, |ui| {
+                    // Title
+                    common::field_label(ui, "Title");
+                    let header = ui.add(
+                        egui::TextEdit::singleline(&mut app.task_manager.writer.title_buffer)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("What needs to be done?"),
+                    );
 
-            // Details
-            common::field_label(ui, "Details");
-            if app.task_manager.writer.code {
-                ui.code_editor(&mut app.task_manager.writer.details_buffer);
-            } else {
-                ui.add(
-                    egui::TextEdit::multiline(&mut app.task_manager.writer.details_buffer)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(4)
-                        .hint_text("Additional context…"),
-                );
-            }
+                    ui.add_space(4.0);
 
-            ui.add_space(4.0);
+                    // Details — code-mode toggle inline with the label
+                    ui.horizontal(|ui| {
+                        common::field_label(ui, "Details");
+                        ui.add_space(8.0);
+                        let code = &mut app.task_manager.writer.code;
+                        ui.checkbox(
+                            code,
+                            egui::RichText::new("Code")
+                                .size(11.0)
+                                .color(colors::SUBTEXT0),
+                        );
+                    });
+                    if app.task_manager.writer.code {
+                        ui.code_editor(&mut app.task_manager.writer.details_buffer);
+                    } else {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut app.task_manager.writer.details_buffer)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(4)
+                                .hint_text("Additional context…"),
+                        );
+                    }
 
-            // Tags
-            common::field_label(ui, "Tags");
-            {
-                let tags: Vec<String> = app
-                    .task_manager
-                    .writer
-                    .tags_buffer
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if !tags.is_empty() {
-                    let mut to_remove: Option<usize> = None;
-                    ui.horizontal_wrapped(|ui| {
-                        for (i, tag) in tags.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 2.0;
-                                ui.label(egui::RichText::new(tag).color(colors::TEAL).size(11.0));
-                                if common::secondary_button(ui, "✕")
-                                    .on_hover_text("Remove tag")
-                                    .clicked()
-                                {
-                                    to_remove = Some(i);
+                    // Auto-focus title on first frame (must be inside scroll area to capture header)
+                    if let EditFocus::None = app.task_manager.writer.has_focus {
+                        header.request_focus();
+                        app.task_manager.writer.has_focus = EditFocus::Header;
+                    }
+                    app.task_manager.writer.initial_frame = false;
+
+                    ui.add_space(4.0);
+
+                    // Tags
+                    common::field_label(ui, "Tags");
+                    {
+                        let tags: Vec<String> = app
+                            .task_manager
+                            .writer
+                            .tags_buffer
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        if !tags.is_empty() {
+                            let mut to_remove: Option<usize> = None;
+                            ui.horizontal_wrapped(|ui| {
+                                for (i, tag) in tags.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 2.0;
+                                        ui.label(
+                                            egui::RichText::new(tag).color(colors::TEAL).size(11.0),
+                                        );
+                                        if common::secondary_button(ui, "✕")
+                                            .on_hover_text("Remove tag")
+                                            .clicked()
+                                        {
+                                            to_remove = Some(i);
+                                        }
+                                    });
+                                    ui.add_space(4.0);
                                 }
                             });
-                            ui.add_space(4.0);
+                            if let Some(idx) = to_remove {
+                                let remaining: Vec<String> = tags
+                                    .into_iter()
+                                    .enumerate()
+                                    .filter(|(i, _)| *i != idx)
+                                    .map(|(_, t)| t)
+                                    .collect();
+                                app.task_manager.writer.tags_buffer = if remaining.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("{}, ", remaining.join(", "))
+                                };
+                            }
                         }
-                    });
-                    if let Some(idx) = to_remove {
-                        let remaining: Vec<String> = tags
-                            .into_iter()
-                            .enumerate()
-                            .filter(|(i, _)| *i != idx)
-                            .map(|(_, t)| t)
-                            .collect();
-                        app.task_manager.writer.tags_buffer = if remaining.is_empty() {
-                            String::new()
-                        } else {
-                            format!("{}, ", remaining.join(", "))
-                        };
                     }
-                }
-            }
-            ui.add(
-                egui::TextEdit::singleline(&mut app.task_manager.writer.tags_buffer)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("work, urgent, …  (comma-separated)"),
-            );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut app.task_manager.writer.tags_buffer)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("work, urgent, …  (comma-separated)"),
+                    );
 
-            // Autocomplete suggestions
-            {
-                let partial = app
-                    .task_manager
-                    .writer
-                    .tags_buffer
-                    .rsplit(',')
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_lowercase();
+                    // Autocomplete suggestions
+                    {
+                        let partial = app
+                            .task_manager
+                            .writer
+                            .tags_buffer
+                            .rsplit(',')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_lowercase();
 
-                if !partial.is_empty() && !app.known_tags.is_empty() {
-                    let suggestions: Vec<String> = app
-                        .known_tags
-                        .iter()
-                        .filter(|t| t.to_lowercase().starts_with(&partial))
-                        .take(5)
-                        .cloned()
-                        .collect();
+                        if !partial.is_empty() && !app.known_tags.is_empty() {
+                            let suggestions: Vec<String> = app
+                                .known_tags
+                                .iter()
+                                .filter(|t| t.to_lowercase().starts_with(&partial))
+                                .take(5)
+                                .cloned()
+                                .collect();
 
-                    if !suggestions.is_empty() {
-                        let mut chosen: Option<String> = None;
-                        egui::Frame::new()
-                            .fill(colors::SURFACE0)
-                            .stroke(egui::Stroke::new(1.0, colors::SURFACE1))
-                            .inner_margin(egui::Margin::same(4_i8))
-                            .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                for suggestion in &suggestions {
-                                    if ui
-                                        .selectable_label(
-                                            false,
-                                            egui::RichText::new(suggestion)
-                                                .color(colors::TEAL)
-                                                .size(11.0),
-                                        )
-                                        .clicked()
-                                    {
-                                        chosen = Some(suggestion.clone());
+                            if !suggestions.is_empty() {
+                                let mut chosen: Option<String> = None;
+                                egui::Frame::new()
+                                    .fill(colors::SURFACE0)
+                                    .stroke(egui::Stroke::new(1.0, colors::SURFACE1))
+                                    .inner_margin(egui::Margin::same(4_i8))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        for suggestion in &suggestions {
+                                            if ui
+                                                .selectable_label(
+                                                    false,
+                                                    egui::RichText::new(suggestion)
+                                                        .color(colors::TEAL)
+                                                        .size(11.0),
+                                                )
+                                                .clicked()
+                                            {
+                                                chosen = Some(suggestion.clone());
+                                            }
+                                        }
+                                    });
+
+                                if let Some(tag) = chosen {
+                                    let buf = &mut app.task_manager.writer.tags_buffer;
+                                    if let Some(last_comma) = buf.rfind(',') {
+                                        buf.truncate(last_comma + 1);
+                                        buf.push(' ');
+                                        buf.push_str(&tag);
+                                        buf.push_str(", ");
+                                    } else {
+                                        *buf = format!("{}, ", tag);
                                     }
                                 }
-                            });
-
-                        if let Some(tag) = chosen {
-                            let buf = &mut app.task_manager.writer.tags_buffer;
-                            if let Some(last_comma) = buf.rfind(',') {
-                                buf.truncate(last_comma + 1);
-                                buf.push(' ');
-                                buf.push_str(&tag);
-                                buf.push_str(", ");
-                            } else {
-                                *buf = format!("{}, ", tag);
                             }
                         }
                     }
-                }
-            }
 
-            ui.add_space(4.0);
+                    ui.add_space(4.0);
 
-            // Priority + code mode
-            common::field_label(ui, "Priority");
-            ui.horizontal(|ui| {
-                use crate::ui::theme::icons;
-                let priority_label = match app.task_manager.writer.priority {
-                    Priority::Low => format!("{}  Low", icons::PRIORITY_LOW),
-                    Priority::Normal => "Normal".to_string(),
-                    Priority::Urgent => format!("{}  Urgent", icons::PRIORITY_URGENT),
-                };
-                egui::ComboBox::from_id_salt("priority_combo")
-                    .selected_text(priority_label)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut app.task_manager.writer.priority,
-                            Priority::Low,
-                            format!("{}  Low", icons::PRIORITY_LOW),
-                        );
-                        ui.selectable_value(
-                            &mut app.task_manager.writer.priority,
-                            Priority::Normal,
-                            "Normal",
-                        );
-                        ui.selectable_value(
-                            &mut app.task_manager.writer.priority,
-                            Priority::Urgent,
-                            format!("{}  Urgent", icons::PRIORITY_URGENT),
-                        );
-                    });
-
-                ui.add_space(8.0);
-                let code = &mut app.task_manager.writer.code;
-                if ui
-                    .selectable_label(*code, egui::RichText::new("{ } Code").size(11.0))
-                    .clicked()
-                {
-                    *code = !*code;
-                }
-            });
-
-            ui.add_space(4.0);
-
-            // Status
-            common::field_label(ui, "Status");
-            ui.horizontal_wrapped(|ui| {
-                use crate::ui::theme::{icons, status_color};
-                const STATUSES: [(TaskStatus, &str, &str); 4] = [
-                    (TaskStatus::NotStarted, icons::STATUS_NOT_STARTED, "None"),
-                    (TaskStatus::InProgress, icons::STATUS_IN_PROGRESS, "Active"),
-                    (TaskStatus::OnHold, icons::STATUS_ON_HOLD, "Hold"),
-                    (TaskStatus::Completed, icons::STATUS_COMPLETED, "Done"),
-                ];
-                for (status, icon, label) in STATUSES {
-                    let selected = app.task_manager.writer.status == status;
-                    let color = status_color(&status);
-                    let text = egui::RichText::new(format!("{icon} {label}"))
-                        .color(if selected { colors::MANTLE } else { color })
-                        .size(11.0);
-                    let btn = egui::Button::new(text)
-                        .fill(if selected { color } else { colors::SURFACE0 })
-                        .stroke(egui::Stroke::new(1.0, color));
-                    if ui.add(btn).clicked() {
-                        app.task_manager.writer.status = status;
-                    }
-                }
-            });
-
-            ui.add_space(4.0);
-
-            // Due date
-            common::field_label(ui, "Due date");
-            date_field(
-                ui,
-                &mut app.task_manager.writer.due_text,
-                &mut app.task_manager.writer.duedate,
-                "due_date_picker",
-                |dt| (format_due_short(dt), due_date_color(dt)),
-            );
-
-            ui.add_space(4.0);
-
-            // Wait until (hidden-until date)
-            common::field_label(ui, "Wait until  (hide until this date)");
-            date_field(
-                ui,
-                &mut app.task_manager.writer.wait_text,
-                &mut app.task_manager.writer.wait_until,
-                "wait_until_picker",
-                |dt| {
-                    (
-                        format!("hidden until {}", format_due_short(dt)),
-                        colors::OVERLAY1,
-                    )
-                },
-            );
-
-            ui.add_space(4.0);
-
-            // Recurrence
-            common::field_label(ui, "Recurrence");
-            let recur_label = match &app.task_manager.writer.recurrence {
-                None => "None".to_string(),
-                Some(r) => r.to_string(),
-            };
-            egui::ComboBox::from_id_salt("recurrence_combo")
-                .selected_text(recur_label)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut app.task_manager.writer.recurrence, None, "None");
-                    ui.selectable_value(
-                        &mut app.task_manager.writer.recurrence,
-                        Some(Recurrence::Daily),
-                        "Daily",
-                    );
-                    ui.selectable_value(
-                        &mut app.task_manager.writer.recurrence,
-                        Some(Recurrence::Weekly),
-                        "Weekly",
-                    );
-                    ui.selectable_value(
-                        &mut app.task_manager.writer.recurrence,
-                        Some(Recurrence::Monthly),
-                        "Monthly",
-                    );
-                    ui.selectable_value(
-                        &mut app.task_manager.writer.recurrence,
-                        Some(Recurrence::Yearly),
-                        "Yearly",
-                    );
-                });
-
-            // Notes (only available when editing an existing task)
-            if is_edit {
-                ui.add_space(4.0);
-                ui.separator();
-                ui.add_space(4.0);
-                common::field_label(ui, "Notes");
-
-                let mut to_delete_ann: Option<ObjectId> = None;
-                egui::ScrollArea::vertical()
-                    .id_salt("editor_annotations_scroll")
-                    .max_height(120.0)
-                    .show(ui, |ui| {
-                        if app.annotations.is_empty() {
-                            ui.label(
-                                egui::RichText::new("No notes yet.")
-                                    .color(colors::OVERLAY1)
-                                    .size(11.0)
-                                    .italics(),
-                            );
-                        }
-                        for ann in &app.annotations {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new(format_annotation_ts(&ann.created_at))
-                                        .color(colors::SUBTEXT0)
-                                        .size(11.0),
-                                );
-                                if common::secondary_button(ui, "✕")
-                                    .on_hover_text("Delete note")
-                                    .clicked()
-                                {
-                                    to_delete_ann = Some(ann.id);
-                                }
-                            });
-                            ui.label(egui::RichText::new(&ann.content).size(11.0));
-                            ui.add_space(2.0);
-                        }
-                    });
-
-                if let Some(ann_id) = to_delete_ann {
-                    let task_id_opt = if let Mode::Insert(Some(id)) = &app.app_state.mode {
-                        Some(*id)
-                    } else {
-                        None
-                    };
-                    if let Some(task_id) = task_id_opt {
-                        let tx = app.backend_manager.tx.clone();
-                        std::thread::spawn(move || {
-                            if let Err(e) = DB.delete_annotation(ann_id) {
-                                let _ = tx.send(UpdateMessage::Error(e));
-                                return;
-                            }
-                            match DB.get_annotations(task_id) {
-                                Ok(anns) => {
-                                    tx.send(UpdateMessage::Annotations(task_id, anns)).ok();
-                                }
-                                Err(e) => {
-                                    tx.send(UpdateMessage::Error(e)).ok();
-                                }
-                            }
-                        });
-                    }
-                }
-
-                let note_resp = ui.add(
-                    egui::TextEdit::singleline(&mut app.annotation_buf)
-                        .id(ann_input_id)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("Add a note… (Enter to save)"),
-                );
-                if note_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    ui.ctx().memory_mut(|m| m.surrender_focus(ann_input_id));
-                    app.annotation_buf.clear();
-                }
-                if note_resp.lost_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                    && !app.annotation_buf.is_empty()
-                {
-                    let task_id_opt = if let Mode::Insert(Some(id)) = &app.app_state.mode {
-                        Some(*id)
-                    } else {
-                        None
-                    };
-                    if let Some(task_id) = task_id_opt {
-                        let annotation = Annotation {
-                            id: ObjectId::new(),
-                            task_id,
-                            content: std::mem::take(&mut app.annotation_buf),
-                            created_at: polodb_core::bson::DateTime::now(),
+                    // Priority
+                    common::field_label(ui, "Priority");
+                    ui.horizontal(|ui| {
+                        use crate::ui::theme::icons;
+                        let priority_label = match app.task_manager.writer.priority {
+                            Priority::Low => format!("{}  Low", icons::PRIORITY_LOW),
+                            Priority::Normal => "Normal".to_string(),
+                            Priority::Urgent => format!("{}  Urgent", icons::PRIORITY_URGENT),
                         };
-                        let tx = app.backend_manager.tx.clone();
-                        std::thread::spawn(move || {
-                            if let Err(e) = DB.add_annotation(annotation) {
-                                let _ = tx.send(UpdateMessage::Error(e));
-                                return;
-                            }
-                            match DB.get_annotations(task_id) {
-                                Ok(anns) => {
-                                    tx.send(UpdateMessage::Annotations(task_id, anns)).ok();
-                                }
-                                Err(e) => {
-                                    tx.send(UpdateMessage::Error(e)).ok();
-                                }
-                            }
-                        });
-                    }
-                }
-            }
+                        egui::ComboBox::from_id_salt("priority_combo")
+                            .selected_text(priority_label)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut app.task_manager.writer.priority,
+                                    Priority::Low,
+                                    format!("{}  Low", icons::PRIORITY_LOW),
+                                );
+                                ui.selectable_value(
+                                    &mut app.task_manager.writer.priority,
+                                    Priority::Normal,
+                                    "Normal",
+                                );
+                                ui.selectable_value(
+                                    &mut app.task_manager.writer.priority,
+                                    Priority::Urgent,
+                                    format!("{}  Urgent", icons::PRIORITY_URGENT),
+                                );
+                            });
+                    });
 
+                    ui.add_space(4.0);
+
+                    // Status
+                    common::field_label(ui, "Status");
+                    ui.horizontal_wrapped(|ui| {
+                        use crate::ui::theme::{icons, status_color};
+                        const STATUSES: [(TaskStatus, &str, &str); 4] = [
+                            (TaskStatus::NotStarted, icons::STATUS_NOT_STARTED, "None"),
+                            (TaskStatus::InProgress, icons::STATUS_IN_PROGRESS, "Active"),
+                            (TaskStatus::OnHold, icons::STATUS_ON_HOLD, "Hold"),
+                            (TaskStatus::Completed, icons::STATUS_COMPLETED, "Done"),
+                        ];
+                        for (status, icon, label) in STATUSES {
+                            let selected = app.task_manager.writer.status == status;
+                            let color = status_color(&status);
+                            let text = egui::RichText::new(format!("{icon} {label}"))
+                                .color(if selected { colors::MANTLE } else { color })
+                                .size(11.0);
+                            let btn = egui::Button::new(text)
+                                .fill(if selected { color } else { colors::SURFACE0 })
+                                .stroke(egui::Stroke::new(1.0, color));
+                            if ui.add(btn).clicked() {
+                                app.task_manager.writer.status = status;
+                            }
+                        }
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Due date
+                    common::field_label(ui, "Due date");
+                    date_field(
+                        ui,
+                        &mut app.task_manager.writer.due_text,
+                        &mut app.task_manager.writer.duedate,
+                        "due_date_picker",
+                        |dt| (format_due_short(dt), due_date_color(dt)),
+                    );
+
+                    ui.add_space(4.0);
+
+                    // Wait until (hidden-until date)
+                    common::field_label(ui, "Wait until  (hide until this date)");
+                    date_field(
+                        ui,
+                        &mut app.task_manager.writer.wait_text,
+                        &mut app.task_manager.writer.wait_until,
+                        "wait_until_picker",
+                        |dt| {
+                            (
+                                format!("hidden until {}", format_due_short(dt)),
+                                colors::OVERLAY1,
+                            )
+                        },
+                    );
+
+                    ui.add_space(4.0);
+
+                    // Recurrence
+                    common::field_label(ui, "Recurrence");
+                    let recur_label = match &app.task_manager.writer.recurrence {
+                        None => "None".to_string(),
+                        Some(r) => r.to_string(),
+                    };
+                    egui::ComboBox::from_id_salt("recurrence_combo")
+                        .selected_text(recur_label)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut app.task_manager.writer.recurrence,
+                                None,
+                                "None",
+                            );
+                            ui.selectable_value(
+                                &mut app.task_manager.writer.recurrence,
+                                Some(Recurrence::Daily),
+                                "Daily",
+                            );
+                            ui.selectable_value(
+                                &mut app.task_manager.writer.recurrence,
+                                Some(Recurrence::Weekly),
+                                "Weekly",
+                            );
+                            ui.selectable_value(
+                                &mut app.task_manager.writer.recurrence,
+                                Some(Recurrence::Monthly),
+                                "Monthly",
+                            );
+                            ui.selectable_value(
+                                &mut app.task_manager.writer.recurrence,
+                                Some(Recurrence::Yearly),
+                                "Yearly",
+                            );
+                        });
+                }); // end ScrollArea
+
+            // Actions — always visible below the scroll area
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(8.0);
-
-            // Actions
             ui.horizontal(|ui| {
                 use crate::ui::theme::icons;
                 if common::primary_button(ui, format!("{}  Save", icons::SAVE)).clicked() {
@@ -723,19 +636,10 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
                     submit(app);
                 }
             });
+        }); // end Frame
 
-            // Auto-focus title on first frame
-            if let EditFocus::None = app.task_manager.writer.has_focus {
-                header.request_focus();
-                app.task_manager.writer.has_focus = EditFocus::Header;
-            }
-            app.task_manager.writer.initial_frame = false;
-        });
-
-    let note_focused = ui.ctx().memory(|m| m.focused() == Some(ann_input_id));
-    let enter = !note_focused && ui.input(|i| i.key_pressed(egui::Key::Enter));
-    let esc = !note_focused && ui.input(|i| i.key_pressed(egui::Key::Escape));
-
+    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
     if enter {
         submit(app);
     }

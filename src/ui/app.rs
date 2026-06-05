@@ -488,10 +488,10 @@ impl eframe::App for FastTask {
             WindowState::Tasks => task_state(ui, self),
         };
 
-        // Keybinding help popup
+        // Keybinding help popup — separate OS viewport so it can float above the main window
         if self.app_state.show_help {
             show_help_popup(
-                ui,
+                ui.ctx(),
                 &self.app_state.mode,
                 &self.app_state.window_state,
                 &mut self.app_state.show_help,
@@ -645,7 +645,7 @@ impl FastTask {
     }
 }
 
-fn show_help_popup(ui: &mut egui::Ui, mode: &Mode, window: &WindowState, show: &mut bool) {
+fn show_help_popup(ctx: &egui::Context, mode: &Mode, window: &WindowState, show: &mut bool) {
     use crate::ui::theme::colors;
 
     let bindings: &[(&str, &str)] = match (mode, window) {
@@ -710,56 +710,73 @@ fn show_help_popup(ui: &mut egui::Ui, mode: &Mode, window: &WindowState, show: &
         ],
     };
 
-    egui::Modal::new(egui::Id::new("help_popup")).show(ui.ctx(), |ui| {
-        ui.set_min_width(340.0);
-        ui.label(
-            egui::RichText::new("Keybindings  (Esc to close)")
-                .color(colors::LAVENDER)
-                .size(15.0)
-                .strong(),
-        );
-        ui.separator();
-        ui.add_space(4.0);
+    // Separate OS viewport so the popup can float freely above the main window.
+    let close = std::cell::Cell::new(false);
+    ctx.show_viewport_immediate(
+        egui::ViewportId::from_hash_of("help_popup"),
+        egui::ViewportBuilder::default()
+            .with_title("Keybindings")
+            .with_inner_size([440.0, 500.0])
+            .with_resizable(true),
+        |ctx, _class| {
+            if ctx.input(|i| i.viewport().close_requested())
+                || ctx.input(|i| i.key_pressed(egui::Key::Escape))
+            {
+                close.set(true);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            // CentralPanel::show(ctx, ..) is deprecated in favour of show_inside(ui, ..), but
+            // show_inside requires a &mut Ui which doesn't exist at the top of a viewport callback.
+            // show(ctx, ..) is the correct pattern here; suppress the lint.
+            #[allow(deprecated)]
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new("Keybindings  (Esc to close)")
+                        .color(colors::LAVENDER)
+                        .size(15.0)
+                        .strong(),
+                );
+                ui.separator();
+                ui.add_space(4.0);
 
-        let max_h = ui.ctx().viewport_rect().height() - 120.0;
-        egui::ScrollArea::vertical()
-            .max_height(max_h.max(200.0))
-            .show(ui, |ui| {
-                egui::Grid::new("help_grid")
-                    .num_columns(2)
-                    .spacing([16.0, 3.0])
-                    .show(ui, |ui| {
-                        for (key, desc) in bindings {
-                            if key.is_empty() {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::Grid::new("help_grid")
+                        .num_columns(2)
+                        .spacing([16.0, 3.0])
+                        .show(ui, |ui| {
+                            for (key, desc) in bindings {
+                                if key.is_empty() {
+                                    ui.end_row();
+                                    continue;
+                                }
+                                if desc.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(*key)
+                                            .color(colors::BLUE)
+                                            .strong()
+                                            .size(11.0),
+                                    );
+                                    ui.label("");
+                                } else {
+                                    ui.label(
+                                        egui::RichText::new(*key)
+                                            .color(colors::YELLOW)
+                                            .size(12.0)
+                                            .monospace(),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(*desc).color(colors::TEXT).size(11.0),
+                                    );
+                                }
                                 ui.end_row();
-                                continue;
                             }
-                            if desc.is_empty() {
-                                // Section header
-                                ui.label(
-                                    egui::RichText::new(*key)
-                                        .color(colors::BLUE)
-                                        .strong()
-                                        .size(11.0),
-                                );
-                                ui.label("");
-                            } else {
-                                ui.label(
-                                    egui::RichText::new(*key)
-                                        .color(colors::YELLOW)
-                                        .size(12.0)
-                                        .monospace(),
-                                );
-                                ui.label(egui::RichText::new(*desc).color(colors::TEXT).size(11.0));
-                            }
-                            ui.end_row();
-                        }
-                    });
+                        });
+                });
             });
+        },
+    );
 
-        ui.add_space(6.0);
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            *show = false;
-        }
-    });
+    if close.get() {
+        *show = false;
+    }
 }
