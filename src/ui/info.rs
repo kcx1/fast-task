@@ -70,7 +70,7 @@ fn date_field(
         }
 
         if date.is_some()
-            && common::secondary_button(ui, "✕")
+            && common::secondary_button(ui, crate::ui::theme::icons::DISCARD)
                 .on_hover_text("Clear date")
                 .clicked()
         {
@@ -87,7 +87,7 @@ fn date_field(
     } else if !text_buf.is_empty() {
         ui.label(
             egui::RichText::new("unrecognized date")
-                .color(colors::OVERLAY0)
+                .color(colors::YELLOW)
                 .size(11.0)
                 .italics(),
         );
@@ -298,24 +298,6 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
         app.task_manager.writer = TaskWriter::from(task);
     }
 
-    // Fetch annotations for the task being edited if not yet loaded
-    if let Mode::Insert(Some(task_id)) = &app.app_state.mode {
-        let task_id = *task_id;
-        if app.annotation_task_id != Some(task_id) {
-            app.annotation_task_id = Some(task_id);
-            app.annotations.clear();
-            let tx = app.backend_manager.tx.clone();
-            std::thread::spawn(move || match DB.get_annotations(task_id) {
-                Ok(anns) => {
-                    tx.send(UpdateMessage::Annotations(task_id, anns)).ok();
-                }
-                Err(e) => {
-                    tx.send(UpdateMessage::Error(e)).ok();
-                }
-            });
-        }
-    }
-
     let is_edit = matches!(&app.app_state.mode, Mode::Insert(Some(_)));
 
     egui::Frame::new()
@@ -333,7 +315,10 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
             ui.add_space(8.0);
 
             // Buttons pinned at bottom; scroll area fills the middle.
-            let scroll_h = (ui.available_height() - 64.0).max(100.0);
+            // Subtract the action bar's height (separator + spacing + button row ≈ 56 px).
+            // .max(0.0) so a tiny window collapses the scroll area rather than pushing
+            // the buttons off-screen (the old .max(100.0) made overflow worse, not better).
+            let scroll_h = (ui.available_height() - 56.0).max(0.0);
 
             egui::ScrollArea::vertical()
                 .max_height(scroll_h)
@@ -355,19 +340,26 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
                         let code = &mut app.task_manager.writer.code;
                         ui.checkbox(
                             code,
-                            egui::RichText::new("Code")
+                            egui::RichText::new("Monospace")
                                 .size(11.0)
                                 .color(colors::SUBTEXT0),
-                        );
+                        )
+                        .on_hover_text("Render details as fixed-width text");
                     });
                     if app.task_manager.writer.code {
                         ui.code_editor(&mut app.task_manager.writer.details_buffer);
                     } else {
+                        // Shift+Enter inserts a newline; plain Enter is reserved for the
+                        // global submit handler below.
                         ui.add(
                             egui::TextEdit::multiline(&mut app.task_manager.writer.details_buffer)
                                 .desired_width(f32::INFINITY)
                                 .desired_rows(4)
-                                .hint_text("Additional context…"),
+                                .hint_text("Additional context…")
+                                .return_key(egui::KeyboardShortcut::new(
+                                    egui::Modifiers::SHIFT,
+                                    egui::Key::Enter,
+                                )),
                         );
                     }
 
@@ -400,9 +392,12 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
                                         ui.label(
                                             egui::RichText::new(tag).color(colors::TEAL).size(11.0),
                                         );
-                                        if common::secondary_button(ui, "✕")
-                                            .on_hover_text("Remove tag")
-                                            .clicked()
+                                        if common::secondary_button(
+                                            ui,
+                                            crate::ui::theme::icons::DISCARD,
+                                        )
+                                        .on_hover_text("Remove tag")
+                                        .clicked()
                                         {
                                             to_remove = Some(i);
                                         }
@@ -526,28 +521,42 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
 
                     // Status
                     common::field_label(ui, "Status");
-                    ui.horizontal_wrapped(|ui| {
+                    {
                         use crate::ui::theme::{icons, status_color};
-                        const STATUSES: [(TaskStatus, &str, &str); 4] = [
-                            (TaskStatus::NotStarted, icons::STATUS_NOT_STARTED, "None"),
-                            (TaskStatus::InProgress, icons::STATUS_IN_PROGRESS, "Active"),
-                            (TaskStatus::OnHold, icons::STATUS_ON_HOLD, "Hold"),
-                            (TaskStatus::Completed, icons::STATUS_COMPLETED, "Done"),
-                        ];
-                        for (status, icon, label) in STATUSES {
-                            let selected = app.task_manager.writer.status == status;
-                            let color = status_color(&status);
-                            let text = egui::RichText::new(format!("{icon} {label}"))
-                                .color(if selected { colors::MANTLE } else { color })
-                                .size(11.0);
-                            let btn = egui::Button::new(text)
-                                .fill(if selected { color } else { colors::SURFACE0 })
-                                .stroke(egui::Stroke::new(1.0, color));
-                            if ui.add(btn).clicked() {
-                                app.task_manager.writer.status = status;
+                        let status_label = |s: &TaskStatus| match s {
+                            TaskStatus::NotStarted => {
+                                format!("{}  None", icons::STATUS_NOT_STARTED)
                             }
-                        }
-                    });
+                            TaskStatus::InProgress => {
+                                format!("{}  Active", icons::STATUS_IN_PROGRESS)
+                            }
+                            TaskStatus::OnHold => format!("{}  Hold", icons::STATUS_ON_HOLD),
+                            TaskStatus::Completed => {
+                                format!("{}  Done", icons::STATUS_COMPLETED)
+                            }
+                        };
+                        let current = app.task_manager.writer.status.clone();
+                        let selected_text = egui::RichText::new(status_label(&current))
+                            .color(status_color(&current));
+                        egui::ComboBox::from_id_salt("status_combo")
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                for status in [
+                                    TaskStatus::NotStarted,
+                                    TaskStatus::InProgress,
+                                    TaskStatus::OnHold,
+                                    TaskStatus::Completed,
+                                ] {
+                                    let text = egui::RichText::new(status_label(&status))
+                                        .color(status_color(&status));
+                                    ui.selectable_value(
+                                        &mut app.task_manager.writer.status,
+                                        status,
+                                        text,
+                                    );
+                                }
+                            });
+                    }
 
                     ui.add_space(4.0);
 
@@ -564,7 +573,8 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
                     ui.add_space(4.0);
 
                     // Wait until (hidden-until date)
-                    common::field_label(ui, "Wait until  (hide until this date)");
+                    common::field_label(ui, "Wait until")
+                        .on_hover_text("Task is hidden from the list until this date passes");
                     date_field(
                         ui,
                         &mut app.task_manager.writer.wait_text,
@@ -573,7 +583,7 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
                         |dt| {
                             (
                                 format!("hidden until {}", format_due_short(dt)),
-                                colors::OVERLAY1,
+                                colors::SUBTEXT0,
                             )
                         },
                     );
@@ -626,25 +636,44 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
                 if common::primary_button(ui, format!("{}  Save", icons::SAVE)).clicked() {
                     submit(app);
                 }
-                if common::secondary_button(ui, format!("{}  Discard", icons::DISCARD)).clicked() {
-                    discard(app);
-                }
-                if common::secondary_button(ui, format!("{}  Done", icons::STATUS_COMPLETED))
+                if common::secondary_button(ui, format!("{}  Save & Done", icons::STATUS_COMPLETED))
+                    .on_hover_text("Save and mark as completed")
                     .clicked()
                 {
                     app.task_manager.writer.status = TaskStatus::Completed;
                     submit(app);
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if common::secondary_button(ui, format!("{}  Discard", icons::DISCARD))
+                        .clicked()
+                    {
+                        discard(app);
+                    }
+                });
             });
         }); // end Frame
 
-    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let (enter, shift_held) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.modifiers.shift));
     let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-    if enter {
+    // Shift+Enter is handled by the Details TextEdit's return_key; plain Enter saves.
+    if enter && !shift_held {
         submit(app);
     }
     if esc {
-        discard(app);
+        // When a ComboBox or DatePicker popup is open, Esc closes the popup but does NOT
+        // set keyboard focus — memory().focused() would return None and we'd discard the
+        // whole form. Skip our handler and let egui close the popup naturally.
+        let popup_open = egui::Popup::is_any_open(ui.ctx());
+        if !popup_open {
+            // Surrender focus from the active text field first; discard only when nothing
+            // is focused (two-stage: first Esc blurs the field, second Esc discards).
+            let focused = ui.ctx().memory(|m| m.focused());
+            if let Some(id) = focused {
+                ui.ctx().memory_mut(|m| m.surrender_focus(id));
+            } else {
+                discard(app);
+            }
+        }
     }
 }
 
