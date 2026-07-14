@@ -80,7 +80,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux system dependencies
+      - name: Install Linux system dependenc
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
