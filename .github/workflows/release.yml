@@ -2,6 +2,7 @@ name: Release
 
 permissions:
   contents: write
+  pull-requests: write
 
 on:
   push:
@@ -37,12 +38,31 @@ jobs:
           body: ${{ steps.changelog.outputs.changes || 'Initial release.' }}
           token: ${{ github.token }}
 
-      - name: Commit CHANGELOG.md
-        uses: stefanzweifel/git-auto-commit-action@v4
+      - name: Commit CHANGELOG.md to a branch
+        id: commit-changelog
+        uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          branch: main
+          branch: chore/changelog-${{ github.ref_name }}
+          create_branch: true
           commit_message: 'docs: update CHANGELOG.md for ${{ github.ref_name }} [skip ci]'
           file_pattern: CHANGELOG.md
+
+      - name: Open and merge changelog PR
+        if: steps.commit-changelog.outputs.changes_detected == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr create \
+            --repo "${{ github.repository }}" \
+            --base main \
+            --head "chore/changelog-${{ github.ref_name }}" \
+            --title "docs: update CHANGELOG.md for ${{ github.ref_name }}" \
+            --body "Automated changelog update for ${{ github.ref_name }}."
+
+          gh pr merge \
+            --repo "${{ github.repository }}" \
+            "chore/changelog-${{ github.ref_name }}" \
+            --squash --delete-branch
 
   upload-assets:
     needs: create-release
