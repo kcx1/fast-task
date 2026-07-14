@@ -140,26 +140,26 @@ pub fn apply(ctx: &egui::Context) {
     style.text_styles = [
         (
             TextStyle::Heading,
-            FontId::new(6.0_f32, FontFamily::Proportional),
+            FontId::new(16.0_f32, FontFamily::Proportional),
         ),
-        (TextStyle::Body, FontId::new(3.0_f32, FontFamily::Proportional)),
+        (TextStyle::Body, FontId::new(13.0_f32, FontFamily::Proportional)),
         (
             TextStyle::Button,
-            FontId::new(3.0_f32, FontFamily::Proportional),
+            FontId::new(13.0_f32, FontFamily::Proportional),
         ),
         (
             TextStyle::Small,
-            FontId::new(1.0_f32, FontFamily::Proportional),
+            FontId::new(11.0_f32, FontFamily::Proportional),
         ),
         (
             TextStyle::Monospace,
-            FontId::new(2.0_f32, FontFamily::Monospace),
+            FontId::new(12.0_f32, FontFamily::Monospace),
         ),
     ]
     .into();
 
     style.spacing.item_spacing = egui::vec2(6.0_f32, 4.0);
-    style.spacing.button_padding = egui::vec2(0.0_f32, 5.0);
+    style.spacing.button_padding = egui::vec2(10.0_f32, 5.0);
     style.spacing.window_margin = egui::Margin::same(12_i8);
     style.spacing.indent = 16.0_f32;
 
