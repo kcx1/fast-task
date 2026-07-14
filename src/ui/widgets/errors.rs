@@ -116,7 +116,7 @@ impl ErrorUi {
                 .show(ctx, |ui| {
                     egui::Frame::new()
                         .fill(colors::SURFACE0)
-                        .stroke(egui::Stroke::new(1.0, colors::YELLOW))
+                        .stroke(egui::Stroke::new(1.0_f32, colors::YELLOW))
                         .corner_radius(egui::CornerRadius::same(4))
                         .inner_margin(egui::Margin::same(8_i8))
                         .show(ui, |ui| {

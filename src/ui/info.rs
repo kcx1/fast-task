@@ -548,7 +548,7 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
                         let highlight = app.task_manager.tag_suggestion_idx;
                         egui::Frame::new()
                             .fill(colors::SURFACE0)
-                            .stroke(egui::Stroke::new(1.0, colors::SURFACE1))
+                            .stroke(egui::Stroke::new(1.0_f32, colors::SURFACE1))
                             .inner_margin(egui::Margin::same(4_i8))
                             .show(ui, |ui| {
                                 ui.set_min_width(ui.available_width());
