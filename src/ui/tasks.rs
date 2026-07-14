@@ -162,6 +162,8 @@ pub struct TaskManager {
     pub sort_order: SortOrder,
     pub sort_picker_open: bool,
     pub sort_picker_cursor: usize,
+    /// Highlighted tag autocomplete suggestion in the editor (keyboard nav).
+    pub tag_suggestion_idx: Option<usize>,
 }
 
 impl TaskManager {
@@ -234,12 +236,18 @@ pub fn task_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
                 .and_then(|i| visible.get(i).copied())
                 .and_then(|ri| app.task_manager.tasks.get(ri))
                 .cloned();
+            let edit_id = current_task.as_ref().map(|t| t.id);
+            let mut edit_clicked = false;
             egui::Panel::bottom("task_detail_bottom")
                 .resizable(true)
                 .default_size(160.0)
                 .show_inside(ui, |ui| {
-                    detail_panel(ui, current_task);
+                    edit_clicked = detail_panel(ui, current_task);
                 });
+            if edit_clicked && let Some(id) = edit_id {
+                app.app_state.mode = Mode::Insert(Some(id));
+                app.app_state.window_state = WindowState::Info;
+            }
         }
 
         crate::ui::widgets::common::heading(ui, "Tasks");
@@ -379,11 +387,27 @@ pub(crate) fn task_card(ui: &mut egui::Ui, task: &Task) {
         });
 }
 
-fn detail_panel(ui: &mut egui::Ui, task: Option<Task>) {
+/// Renders the bottom detail pane. Returns `true` if the `✎ Edit` button was clicked
+/// (the caller enters Insert mode on the current task).
+fn detail_panel(ui: &mut egui::Ui, task: Option<Task>) -> bool {
+    let mut edit_clicked = false;
     egui::Frame::new()
         .inner_margin(egui::Margin::same(8_i8))
         .show(ui, |ui| {
             if let Some(task) = task {
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if crate::ui::widgets::common::secondary_button(
+                            ui,
+                            format!("{}  Edit", crate::ui::theme::icons::MODE_INSERT),
+                        )
+                        .on_hover_text("Edit this task (i / e)")
+                        .clicked()
+                        {
+                            edit_clicked = true;
+                        }
+                    });
+                });
                 task_card(ui, &task);
             } else {
                 ui.centered_and_justified(|ui| {
@@ -396,6 +420,7 @@ fn detail_panel(ui: &mut egui::Ui, task: Option<Task>) {
                 });
             }
         });
+    edit_clicked
 }
 
 /// Spawns a background thread to fetch tasks for `lookup` and sends the result via `tx`.

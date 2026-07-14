@@ -83,7 +83,7 @@ pub fn apply(ctx: &egui::Context) {
     visuals.extreme_bg_color = colors::MANTLE; // text input backgrounds
 
     // Window chrome
-    visuals.window_stroke = Stroke::new(1.0, colors::SURFACE1);
+    visuals.window_stroke = Stroke::new(1.0_f32, colors::SURFACE1);
     visuals.window_shadow = Shadow::NONE;
 
     // Widgets
@@ -92,38 +92,38 @@ pub fn apply(ctx: &egui::Context) {
 
         w.noninteractive.weak_bg_fill = colors::BASE;
         w.noninteractive.bg_fill = colors::SURFACE0;
-        w.noninteractive.bg_stroke = Stroke::new(0.5, colors::SURFACE2);
-        w.noninteractive.fg_stroke = Stroke::new(1.0, colors::SUBTEXT0);
+        w.noninteractive.bg_stroke = Stroke::new(0.5_f32, colors::SURFACE2);
+        w.noninteractive.fg_stroke = Stroke::new(1.0_f32, colors::SUBTEXT0);
         w.noninteractive.corner_radius = ROUND;
 
         w.inactive.weak_bg_fill = colors::SURFACE0;
         w.inactive.bg_fill = colors::SURFACE0;
-        w.inactive.bg_stroke = Stroke::new(1.0, colors::SURFACE1);
-        w.inactive.fg_stroke = Stroke::new(1.0, colors::TEXT);
+        w.inactive.bg_stroke = Stroke::new(1.0_f32, colors::SURFACE1);
+        w.inactive.fg_stroke = Stroke::new(1.0_f32, colors::TEXT);
         w.inactive.corner_radius = ROUND;
 
         w.hovered.weak_bg_fill = colors::SURFACE1;
         w.hovered.bg_fill = colors::SURFACE1;
-        w.hovered.bg_stroke = Stroke::new(1.0, colors::BLUE);
-        w.hovered.fg_stroke = Stroke::new(1.5, colors::TEXT);
+        w.hovered.bg_stroke = Stroke::new(1.0_f32, colors::BLUE);
+        w.hovered.fg_stroke = Stroke::new(1.5_f32, colors::TEXT);
         w.hovered.corner_radius = ROUND;
 
         w.active.weak_bg_fill = colors::SURFACE2;
         w.active.bg_fill = colors::SURFACE2;
-        w.active.bg_stroke = Stroke::new(1.0, colors::BLUE);
-        w.active.fg_stroke = Stroke::new(2.0, colors::TEXT);
+        w.active.bg_stroke = Stroke::new(1.0_f32, colors::BLUE);
+        w.active.fg_stroke = Stroke::new(2.0_f32, colors::TEXT);
         w.active.corner_radius = ROUND;
 
         w.open.weak_bg_fill = colors::SURFACE1;
         w.open.bg_fill = colors::SURFACE1;
-        w.open.bg_stroke = Stroke::new(1.0, colors::BLUE);
-        w.open.fg_stroke = Stroke::new(1.0, colors::TEXT);
+        w.open.bg_stroke = Stroke::new(1.0_f32, colors::BLUE);
+        w.open.fg_stroke = Stroke::new(1.0_f32, colors::TEXT);
         w.open.corner_radius = ROUND;
     }
 
     // Selection highlight
     visuals.selection.bg_fill = Color32::from_rgba_premultiplied(0x8A, 0xAD, 0xF4, 55);
-    visuals.selection.stroke = Stroke::new(1.0, colors::BLUE);
+    visuals.selection.stroke = Stroke::new(1.0_f32, colors::BLUE);
 
     // Misc
     visuals.override_text_color = Some(colors::TEXT);
@@ -140,28 +140,28 @@ pub fn apply(ctx: &egui::Context) {
     style.text_styles = [
         (
             TextStyle::Heading,
-            FontId::new(16.0, FontFamily::Proportional),
+            FontId::new(6.0_f32, FontFamily::Proportional),
         ),
-        (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
+        (TextStyle::Body, FontId::new(3.0_f32, FontFamily::Proportional)),
         (
             TextStyle::Button,
-            FontId::new(13.0, FontFamily::Proportional),
+            FontId::new(3.0_f32, FontFamily::Proportional),
         ),
         (
             TextStyle::Small,
-            FontId::new(11.0, FontFamily::Proportional),
+            FontId::new(1.0_f32, FontFamily::Proportional),
         ),
         (
             TextStyle::Monospace,
-            FontId::new(12.0, FontFamily::Monospace),
+            FontId::new(2.0_f32, FontFamily::Monospace),
         ),
     ]
     .into();
 
-    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
-    style.spacing.button_padding = egui::vec2(10.0, 5.0);
+    style.spacing.item_spacing = egui::vec2(6.0_f32, 4.0);
+    style.spacing.button_padding = egui::vec2(0.0_f32, 5.0);
     style.spacing.window_margin = egui::Margin::same(12_i8);
-    style.spacing.indent = 16.0;
+    style.spacing.indent = 16.0_f32;
 
     ctx.set_global_style(style);
 }

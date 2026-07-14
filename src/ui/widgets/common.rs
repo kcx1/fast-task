@@ -33,7 +33,7 @@ pub fn primary_button(ui: &mut Ui, text: impl ToString) -> Response {
 pub fn secondary_button(ui: &mut Ui, text: impl Into<WidgetText>) -> Response {
     let btn = egui::Button::new(text)
         .fill(colors::SURFACE1)
-        .stroke(egui::Stroke::new(1.0, colors::SURFACE2));
+        .stroke(egui::Stroke::new(1.0_f32, colors::SURFACE2));
     ui.add(btn)
 }
 
