@@ -480,6 +480,11 @@ impl eframe::App for FastTask {
             }
         }
 
+        // Recompute the visible-index cache once per frame — after task refreshes
+        // and the status-bar filter input have settled, before any pane reads the
+        // cursor. Keeps real_index/get_current_task from rebuilding the list per call.
+        self.task_manager.refresh_visible_cache();
+
         // Handle the different window states
         match &self.app_state.window_state {
             WindowState::Projects => project_state(ui, self),

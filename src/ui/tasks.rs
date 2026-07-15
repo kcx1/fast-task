@@ -164,6 +164,10 @@ pub struct TaskManager {
     pub sort_picker_cursor: usize,
     /// Highlighted tag autocomplete suggestion in the editor (keyboard nav).
     pub tag_suggestion_idx: Option<usize>,
+    /// Filtered indices into `tasks`, recomputed once per frame via
+    /// `refresh_visible_cache`. Read by `real_index`/`get_current_task` so they
+    /// don't rebuild the list (and re-syscall the clock) on every call.
+    pub visible_cache: Vec<usize>,
 }
 
 impl TaskManager {
@@ -197,9 +201,17 @@ impl TaskManager {
             .collect()
     }
 
+    /// Recompute `visible_cache`. Call once per frame, after task refreshes and
+    /// the status-bar filter input have settled, before any pane reads the
+    /// cursor via `real_index`/`get_current_task`.
+    pub fn refresh_visible_cache(&mut self) {
+        self.visible_cache = self.visible_indices();
+    }
+
     /// Translate a visible-list cursor position to a real `tasks[]` index.
+    /// Reads the per-frame `visible_cache` (see `refresh_visible_cache`).
     pub fn real_index(&self, visible: usize) -> Option<usize> {
-        self.visible_indices().get(visible).copied()
+        self.visible_cache.get(visible).copied()
     }
 
     /// Returns a clone of the task at the current cursor position, if any.
@@ -216,8 +228,9 @@ pub fn task_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
     // Reset project hover every frame we're in Tasks so Projects pane starts from active filter
     app.project_manager.sync_hover();
 
-    // Compute visible indices once per frame; reused by table, keybinds, and cursor clamp.
-    let visible = app.task_manager.visible_indices();
+    // Reuse the per-frame cache (refreshed before the window_state dispatch);
+    // shared by table, keybinds, and cursor clamp.
+    let visible = app.task_manager.visible_cache.clone();
     let vis_len = visible.len();
 
     // Clamp cursor to visible list length every frame
