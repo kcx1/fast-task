@@ -480,6 +480,11 @@ impl eframe::App for FastTask {
             }
         }
 
+        // Recompute the visible-index cache once per frame — after task refreshes
+        // and the status-bar filter input have settled, before any pane reads the
+        // cursor. Keeps real_index/get_current_task from rebuilding the list per call.
+        self.task_manager.refresh_visible_cache();
+
         // Handle the different window states
         match &self.app_state.window_state {
             WindowState::Projects => project_state(ui, self),
@@ -530,6 +535,10 @@ impl FastTask {
     pub fn select_project(&mut self, idx: usize) {
         self.project_manager.current_project = idx;
         self.project_manager.hovered_project = idx;
+        // A project switch is a context change: drop any active filter so the incoming
+        // project's tasks aren't hidden by the previous project's filter text.
+        self.task_manager.filter_query.clear();
+        self.task_manager.filter_open = false;
         if let Some(project) = self.project_manager.projects.get(idx) {
             let project = project.clone();
             if let Err(e) = DB.save_current_project(project.clone()) {
@@ -607,9 +616,10 @@ impl FastTask {
                 }
                 UpdateMessage::Tasks(tsk) => {
                     self.task_manager.tasks = tsk;
-                    self.task_manager.filter_query.clear();
-                    self.task_manager.filter_open = false;
-                    // Cursor clamping is handled each frame in task_state
+                    // The filter intentionally persists across task refreshes (create / edit /
+                    // complete / undo) so the user can stay focused on a filtered subset. It is
+                    // reset only on an explicit project switch (see `select_project`).
+                    // Cursor clamping is handled each frame in task_state.
                 }
                 UpdateMessage::KnownTags(tags) => {
                     self.known_tags = tags;

@@ -142,7 +142,10 @@ pub fn apply(ctx: &egui::Context) {
             TextStyle::Heading,
             FontId::new(16.0_f32, FontFamily::Proportional),
         ),
-        (TextStyle::Body, FontId::new(13.0_f32, FontFamily::Proportional)),
+        (
+            TextStyle::Body,
+            FontId::new(13.0_f32, FontFamily::Proportional),
+        ),
         (
             TextStyle::Button,
             FontId::new(13.0_f32, FontFamily::Proportional),
