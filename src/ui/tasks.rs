@@ -45,7 +45,7 @@ impl SortOrder {
     /// Human-readable label shown in the sort picker and status bar.
     pub fn label(&self) -> &'static str {
         match self {
-            SortOrder::Free => "Free",
+            SortOrder::Free => "Manual",
             SortOrder::DueDate => "Due Date",
             SortOrder::Modified => "Modified",
             SortOrder::Status => "Status",
@@ -311,12 +311,42 @@ pub fn task_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
         let filtered_tasks: Vec<&Task> = pairs.into_iter().map(|(_, t)| t).collect();
 
         let selected_set = app.task_manager.selected_tasks.clone();
-        task_table(
+        let row_action = task_table(
             ui,
             &filtered_tasks,
             &mut app.task_manager.current,
             &selected_set,
         );
+
+        // Dispatch a mouse row action before the picker/mode handling below, so a
+        // Status click opens the picker this frame and an Edit click flips to
+        // Insert before the mode match reads it (landing on the no-op Insert arm).
+        if let Some(act) = row_action {
+            match act {
+                RowAction::Edit(id) => {
+                    app.app_state.mode = Mode::Insert(Some(id));
+                    app.app_state.window_state = WindowState::Info;
+                }
+                RowAction::Complete(id) => {
+                    let backend = app.backend_manager.backend.clone();
+                    let tx = app.backend_manager.tx.clone();
+                    task_submit_complete(backend, id, tx);
+                }
+                RowAction::Delete(id) => {
+                    let backend = app.backend_manager.backend.clone();
+                    let tx = app.backend_manager.tx.clone();
+                    task_submit_delete(backend, id, tx);
+                    app.app_state.status_msg =
+                        Some(("Deleted — u to undo".to_string(), std::time::Instant::now()));
+                }
+                RowAction::Status(id) => {
+                    app.task_manager.status_picker_cursor = 0;
+                    app.task_manager.status_picker_open = true;
+                    app.task_manager.status_picker_ids.clear();
+                    app.task_manager.status_picker_task_id = Some(id);
+                }
+            }
+        }
 
         if app.task_manager.sort_picker_open {
             sort_picker_modal(ui, app);
@@ -1314,12 +1344,28 @@ pub(crate) fn due_date_color(dt: &DateTime) -> egui::Color32 {
     }
 }
 
+/// An action a mouse user triggered from a task row's hover icons (or the
+/// clickable status glyph). Dispatched by `task_state` through the same
+/// `task_submit_*` / mode paths the keyboard uses, giving mouse parity.
+#[derive(Clone, Copy)]
+pub(crate) enum RowAction {
+    Edit(ObjectId),
+    Complete(ObjectId),
+    Delete(ObjectId),
+    Status(ObjectId),
+}
+
+/// A small frameless icon button sized to sit inside a 26px task row.
+fn row_icon_button(ui: &mut egui::Ui, glyph: &str, color: egui::Color32) -> egui::Response {
+    ui.add(egui::Button::new(egui::RichText::new(glyph).color(color).size(14.0)).frame(false))
+}
+
 fn task_table(
     ui: &mut egui::Ui,
     tasks: &[&Task],
     selected: &mut Option<usize>,
     tab_selected: &std::collections::HashSet<ObjectId>,
-) {
+) -> Option<RowAction> {
     use crate::ui::theme::colors;
 
     if tasks.is_empty() {
@@ -1330,8 +1376,13 @@ fn task_table(
                     .size(11.0),
             );
         });
-        return;
+        return None;
     }
+
+    // Set by a row's hover-icon / status click; read once after the table draws.
+    // `Cell` so the nested `body`/`rows` closures can capture it by shared ref
+    // alongside the mutable `selected` cursor.
+    let action: std::cell::Cell<Option<RowAction>> = std::cell::Cell::new(None);
 
     egui_extras::TableBuilder::new(ui)
         .striped(true)
@@ -1347,124 +1398,192 @@ fn task_table(
                 let is_tab_sel = tab_selected.contains(&task.id);
 
                 row.col(|ui| {
-                    let rect = ui.max_rect();
+                    // Scope every auto-generated widget id in this cell by row so
+                    // the interactive status glyph / hover buttons don't clash
+                    // across rows (egui_extras cells don't row-scope ids for you).
+                    ui.push_id(row_index, |ui| {
+                        let rect = ui.max_rect();
 
-                    let response = ui.interact(rect, ui.id().with(row_index), Sense::click());
-                    if response.clicked() {
-                        *selected = Some(row_index);
-                    }
+                        let response = ui.interact(rect, ui.id().with(row_index), Sense::click());
+                        // Layer-independent hover test: stays true while the pointer is
+                        // over the action buttons drawn on top, so they don't flicker.
+                        let row_hovered = ui.rect_contains_pointer(rect);
+                        // True once any hover icon / status glyph consumes this frame's
+                        // click, so the row-select at the end doesn't also fire.
+                        let mut consumed = false;
 
-                    if is_cursor {
-                        ui.painter().rect_filled(rect, 3.0, colors::BLUE);
-                    } else if is_tab_sel {
-                        ui.painter().rect_filled(rect, 3.0, colors::TEAL_DIM);
-                    } else if response.hovered() {
-                        ui.painter().rect_filled(rect, 3.0, colors::SURFACE1);
-                    }
+                        if is_cursor {
+                            ui.painter().rect_filled(rect, 3.0, colors::BLUE);
+                        } else if is_tab_sel {
+                            ui.painter().rect_filled(rect, 3.0, colors::TEAL_DIM);
+                        } else if row_hovered {
+                            ui.painter().rect_filled(rect, 3.0, colors::SURFACE1);
+                        }
 
-                    ui.add_space(6.0);
+                        ui.add_space(6.0);
 
-                    let is_highlighted = is_cursor || is_tab_sel;
-                    // Title color: MANTLE on highlighted rows; TEXT normally; SUBTEXT0 for Completed.
-                    // Status color is expressed only through the status icon, not the title.
-                    let text_color = if is_highlighted {
-                        colors::MANTLE
-                    } else if task.status == crate::database::models::TaskStatus::Completed {
-                        colors::SUBTEXT0
-                    } else {
-                        colors::TEXT
-                    };
+                        let is_highlighted = is_cursor || is_tab_sel;
+                        // Title color: MANTLE on highlighted rows; TEXT normally; SUBTEXT0 for Completed.
+                        // Status color is expressed only through the status icon, not the title.
+                        let text_color = if is_highlighted {
+                            colors::MANTLE
+                        } else if task.status == crate::database::models::TaskStatus::Completed {
+                            colors::SUBTEXT0
+                        } else {
+                            colors::TEXT
+                        };
 
-                    use crate::ui::theme::icons;
-                    let status_sym = if is_tab_sel && !is_cursor {
-                        "✓"
-                    } else {
-                        match task.status {
+                        use crate::ui::theme::icons;
+                        let status_sym = if is_tab_sel && !is_cursor {
+                            "✓"
+                        } else {
+                            match task.status {
+                                crate::database::models::TaskStatus::NotStarted => {
+                                    icons::STATUS_NOT_STARTED
+                                }
+                                crate::database::models::TaskStatus::InProgress => {
+                                    icons::STATUS_IN_PROGRESS
+                                }
+                                crate::database::models::TaskStatus::OnHold => {
+                                    icons::STATUS_ON_HOLD
+                                }
+                                crate::database::models::TaskStatus::Completed => {
+                                    icons::STATUS_COMPLETED
+                                }
+                            }
+                        };
+                        let status_color = if is_highlighted {
+                            colors::MANTLE
+                        } else {
+                            crate::ui::theme::status_color(&task.status)
+                        };
+
+                        let priority_hint = match task.priority {
+                            Priority::Urgent => icons::PRIORITY_URGENT,
+                            Priority::Normal => "",
+                            Priority::Low => icons::PRIORITY_LOW,
+                        };
+                        let priority_color = if is_highlighted {
+                            colors::MANTLE
+                        } else {
+                            crate::ui::theme::priority_color(&task.priority)
+                        };
+
+                        let status_tip = match task.status {
                             crate::database::models::TaskStatus::NotStarted => {
-                                icons::STATUS_NOT_STARTED
+                                "Not started (s to change)"
                             }
                             crate::database::models::TaskStatus::InProgress => {
-                                icons::STATUS_IN_PROGRESS
+                                "In progress (s to change)"
                             }
-                            crate::database::models::TaskStatus::OnHold => icons::STATUS_ON_HOLD,
+                            crate::database::models::TaskStatus::OnHold => "On hold (s to change)",
                             crate::database::models::TaskStatus::Completed => {
-                                icons::STATUS_COMPLETED
+                                "Completed (s to change)"
                             }
-                        }
-                    };
-                    let status_color = if is_highlighted {
-                        colors::MANTLE
-                    } else {
-                        crate::ui::theme::status_color(&task.status)
-                    };
+                        };
+                        let priority_tip = match task.priority {
+                            Priority::Urgent => "Urgent priority",
+                            Priority::Normal => "",
+                            Priority::Low => "Low priority",
+                        };
+                        let render_row = |ui: &mut egui::Ui, consumed: &mut bool| {
+                            // Status glyph is clickable → open the status picker for
+                            // this task (mouse parity with the `s` keybind).
+                            let status_resp = ui
+                                .add(
+                                    egui::Label::new(
+                                        egui::RichText::new(status_sym.to_string())
+                                            .color(status_color),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                )
+                                .on_hover_text(status_tip);
+                            if status_resp.clicked() {
+                                action.set(Some(RowAction::Status(task.id)));
+                                *consumed = true;
+                            }
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(format!("  {}", task.title))
+                                        .color(text_color),
+                                )
+                                .truncate(),
+                            );
+                            if !priority_hint.is_empty() {
+                                ui.label(egui::RichText::new(priority_hint).color(priority_color))
+                                    .on_hover_text(priority_tip);
+                            }
+                        };
 
-                    let priority_hint = match task.priority {
-                        Priority::Urgent => icons::PRIORITY_URGENT,
-                        Priority::Normal => "",
-                        Priority::Low => icons::PRIORITY_LOW,
-                    };
-                    let priority_color = if is_highlighted {
-                        colors::MANTLE
-                    } else {
-                        crate::ui::theme::priority_color(&task.priority)
-                    };
-
-                    let status_tip = match task.status {
-                        crate::database::models::TaskStatus::NotStarted => {
-                            "Not started (s to change)"
-                        }
-                        crate::database::models::TaskStatus::InProgress => {
-                            "In progress (s to change)"
-                        }
-                        crate::database::models::TaskStatus::OnHold => "On hold (s to change)",
-                        crate::database::models::TaskStatus::Completed => "Completed (s to change)",
-                    };
-                    let priority_tip = match task.priority {
-                        Priority::Urgent => "Urgent priority",
-                        Priority::Normal => "",
-                        Priority::Low => "Low priority",
-                    };
-                    let render_row = |ui: &mut egui::Ui| {
-                        ui.label(egui::RichText::new(status_sym.to_string()).color(status_color))
-                            .on_hover_text(status_tip);
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!("  {}", task.title)).color(text_color),
-                            )
-                            .truncate(),
-                        );
-                        if !priority_hint.is_empty() {
-                            ui.label(egui::RichText::new(priority_hint).color(priority_color))
-                                .on_hover_text(priority_tip);
-                        }
-                    };
-
-                    if let Some(ref due) = task.due {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.add_space(6.0);
-                            let due_color = if is_highlighted {
-                                colors::MANTLE
-                            } else {
-                                due_date_color(due)
-                            };
-                            ui.label(
-                                egui::RichText::new(format_due_short(due))
-                                    .color(due_color)
-                                    .size(11.0),
-                            );
+                            // On hover, the right edge shows the action icons (edit /
+                            // complete / delete) in place of the due date; otherwise
+                            // the due date. Same rect either way, so no layout jump
+                            // fights the buttons for the pointer.
+                            if row_hovered {
+                                // On highlighted rows (BLUE / TEAL_DIM fill) the semantic
+                                // icon colors would wash out — notably a BLUE edit icon on
+                                // the BLUE cursor row — so fall back to MANTLE like the
+                                // rest of the row's content does.
+                                let (c_delete, c_complete, c_edit) = if is_highlighted {
+                                    (colors::MANTLE, colors::MANTLE, colors::MANTLE)
+                                } else {
+                                    (colors::RED, colors::GREEN, colors::BLUE)
+                                };
+                                // right_to_left: first added sits rightmost.
+                                if row_icon_button(ui, icons::DELETE, c_delete)
+                                    .on_hover_text("Delete (Shift+D)")
+                                    .clicked()
+                                {
+                                    action.set(Some(RowAction::Delete(task.id)));
+                                    consumed = true;
+                                }
+                                if row_icon_button(ui, icons::STATUS_COMPLETED, c_complete)
+                                    .on_hover_text("Complete (d)")
+                                    .clicked()
+                                {
+                                    action.set(Some(RowAction::Complete(task.id)));
+                                    consumed = true;
+                                }
+                                if row_icon_button(ui, icons::MODE_INSERT, c_edit)
+                                    .on_hover_text("Edit (e)")
+                                    .clicked()
+                                {
+                                    action.set(Some(RowAction::Edit(task.id)));
+                                    consumed = true;
+                                }
+                            } else if let Some(ref due) = task.due {
+                                let due_color = if is_highlighted {
+                                    colors::MANTLE
+                                } else {
+                                    due_date_color(due)
+                                };
+                                ui.label(
+                                    egui::RichText::new(format_due_short(due))
+                                        .color(due_color)
+                                        .size(11.0),
+                                );
+                            }
                             ui.with_layout(
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
-                                    render_row(ui);
+                                    render_row(ui, &mut consumed);
                                 },
                             );
                         });
-                    } else {
-                        render_row(ui);
-                    }
+
+                        // Row click selects the cursor — but not when an icon / status
+                        // glyph already consumed the click on this row.
+                        if response.clicked() && !consumed {
+                            *selected = Some(row_index);
+                        }
+                    });
                 });
             });
         });
+
+    action.into_inner()
 }
 
 #[cfg(test)]
