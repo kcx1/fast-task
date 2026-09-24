@@ -45,7 +45,7 @@ impl SortOrder {
     /// Human-readable label shown in the sort picker and status bar.
     pub fn label(&self) -> &'static str {
         match self {
-            SortOrder::Free => "Free",
+            SortOrder::Free => "Manual",
             SortOrder::DueDate => "Due Date",
             SortOrder::Modified => "Modified",
             SortOrder::Status => "Status",
@@ -253,7 +253,7 @@ pub fn task_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
             let mut edit_clicked = false;
             egui::Panel::bottom("task_detail_bottom")
                 .resizable(true)
-                .default_size(160.0)
+                .default_size(90.0)
                 .show_inside(ui, |ui| {
                     edit_clicked = detail_panel(ui, current_task);
                 });
@@ -311,12 +311,42 @@ pub fn task_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
         let filtered_tasks: Vec<&Task> = pairs.into_iter().map(|(_, t)| t).collect();
 
         let selected_set = app.task_manager.selected_tasks.clone();
-        task_table(
+        let row_action = task_table(
             ui,
             &filtered_tasks,
             &mut app.task_manager.current,
             &selected_set,
         );
+
+        // Dispatch a mouse row action before the picker/mode handling below, so a
+        // Status click opens the picker this frame and an Edit click flips to
+        // Insert before the mode match reads it (landing on the no-op Insert arm).
+        if let Some(act) = row_action {
+            match act {
+                RowAction::Edit(id) => {
+                    app.app_state.mode = Mode::Insert(Some(id));
+                    app.app_state.window_state = WindowState::Info;
+                }
+                RowAction::Complete(id) => {
+                    let backend = app.backend_manager.backend.clone();
+                    let tx = app.backend_manager.tx.clone();
+                    task_submit_complete(backend, id, tx);
+                }
+                RowAction::Delete(id) => {
+                    let backend = app.backend_manager.backend.clone();
+                    let tx = app.backend_manager.tx.clone();
+                    task_submit_delete(backend, id, tx);
+                    app.app_state.status_msg =
+                        Some(("Deleted — u to undo".to_string(), std::time::Instant::now()));
+                }
+                RowAction::Status(id) => {
+                    app.task_manager.status_picker_cursor = 0;
+                    app.task_manager.status_picker_open = true;
+                    app.task_manager.status_picker_ids.clear();
+                    app.task_manager.status_picker_task_id = Some(id);
+                }
+            }
+        }
 
         if app.task_manager.sort_picker_open {
             sort_picker_modal(ui, app);
@@ -343,7 +373,7 @@ pub fn task_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
 }
 
 /// Read-only summary card for a task — title, details, and metadata grid.
-/// Used in both the bottom detail panel and the Info pane.
+/// Used in the Info pane; the bottom detail pane uses the compact `task_summary`.
 pub(crate) fn task_card(ui: &mut egui::Ui, task: &Task) {
     use crate::ui::theme::colors;
     use crate::ui::widgets::common;
@@ -400,6 +430,36 @@ pub(crate) fn task_card(ui: &mut egui::Ui, task: &Task) {
         });
 }
 
+/// Compact at-a-glance summary for the bottom detail pane: title plus one
+/// wrapped row of status / priority / due / tags. The details body and notes
+/// are left to the Info pane's full `task_card`.
+fn task_summary(ui: &mut egui::Ui, task: &Task) {
+    use crate::ui::theme::colors;
+    use crate::ui::widgets::common;
+    ui.label(egui::RichText::new(&task.title).size(14.0).strong());
+    ui.horizontal_wrapped(|ui| {
+        common::status_badge(ui, &task.status);
+        ui.label(
+            egui::RichText::new(task.priority.to_string())
+                .color(crate::ui::theme::priority_color(&task.priority)),
+        )
+        .on_hover_text("Priority");
+        if let Some(due) = task.due {
+            ui.label(egui::RichText::new(format_due_short(&due)).color(due_date_color(&due)))
+                .on_hover_text("Due");
+        }
+        if let Some(tags) = &task.tags {
+            for tag in tags {
+                ui.label(egui::RichText::new(format!("#{tag}")).color(colors::SUBTEXT0));
+            }
+        }
+        if !task.details.is_empty() {
+            ui.label(egui::RichText::new("…").color(colors::OVERLAY1))
+                .on_hover_text("Has details — open the task (i / e) to read them");
+        }
+    });
+}
+
 /// Renders the bottom detail pane. Returns `true` if the `✎ Edit` button was clicked
 /// (the caller enters Insert mode on the current task).
 fn detail_panel(ui: &mut egui::Ui, task: Option<Task>) -> bool {
@@ -421,7 +481,7 @@ fn detail_panel(ui: &mut egui::Ui, task: Option<Task>) -> bool {
                         }
                     });
                 });
-                task_card(ui, &task);
+                task_summary(ui, &task);
             } else {
                 ui.centered_and_justified(|ui| {
                     ui.label(
@@ -443,7 +503,7 @@ pub fn get_tasks(
     show_completed: bool,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || {
+    crate::ui::bg::spawn(move || {
         match backend
             .get_tasks(lookup)
             .context("No tasks found for the project")
@@ -467,7 +527,7 @@ pub(crate) fn task_submit_edit(
     task_id: ObjectId,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || match backend.one_task(task_id) {
+    crate::ui::bg::spawn(move || match backend.one_task(task_id) {
         Ok(Some(mut task)) => {
             task.title = writer.title_buffer.clone();
             task.details = writer.details_buffer.clone();
@@ -499,7 +559,7 @@ pub(crate) fn task_submit_create(
     project: ProjectEntry,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || {
+    crate::ui::bg::spawn(move || {
         let tags = parse_tags(&writer.tags_buffer);
         let task = Task {
             title: writer.title_buffer.clone(),
@@ -534,7 +594,7 @@ fn task_submit_paste(
     order: u64,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || {
+    crate::ui::bg::spawn(move || {
         let task = Task {
             title: source.title,
             details: source.details,
@@ -579,7 +639,7 @@ fn task_submit_delete(
     task_id: ObjectId,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || match backend.delete_task(task_id) {
+    crate::ui::bg::spawn(move || match backend.delete_task(task_id) {
         Ok(result) => {
             tx.send(UpdateMessage::DbTransaction(Box::new(result))).ok();
         }
@@ -594,7 +654,7 @@ fn task_submit_delete_many(
     ids: Vec<ObjectId>,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || {
+    crate::ui::bg::spawn(move || {
         for id in ids {
             if let Err(e) = backend.delete_task(id) {
                 let _ = tx.send(UpdateMessage::Error(e));
@@ -611,7 +671,7 @@ fn task_submit_set_status(
     status: TaskStatus,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || match backend.one_task(task_id) {
+    crate::ui::bg::spawn(move || match backend.one_task(task_id) {
         Ok(Some(mut task)) => {
             if status == TaskStatus::Completed
                 && let Some(recurrence) = &task.recurrence
@@ -673,7 +733,7 @@ fn task_submit_set_status_many(
     status: TaskStatus,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || {
+    crate::ui::bg::spawn(move || {
         for id in ids {
             match backend.one_task(id) {
                 Ok(Some(mut task)) => {
@@ -1249,7 +1309,7 @@ fn swap_tasks(app: &mut FastTask, backend: Backend, a: usize, b: usize) {
         let tb = app.task_manager.tasks[b].clone();
         app.task_manager.tasks.swap(a, b);
         let tx = app.backend_manager.tx.clone();
-        std::thread::spawn(move || {
+        crate::ui::bg::spawn(move || {
             for task in [ta, tb] {
                 match backend.update_task(task) {
                     Ok(r) => {
@@ -1314,12 +1374,28 @@ pub(crate) fn due_date_color(dt: &DateTime) -> egui::Color32 {
     }
 }
 
+/// An action a mouse user triggered from a task row's hover icons (or the
+/// clickable status glyph). Dispatched by `task_state` through the same
+/// `task_submit_*` / mode paths the keyboard uses, giving mouse parity.
+#[derive(Clone, Copy)]
+pub(crate) enum RowAction {
+    Edit(ObjectId),
+    Complete(ObjectId),
+    Delete(ObjectId),
+    Status(ObjectId),
+}
+
+/// A small frameless icon button sized to sit inside a 26px task row.
+fn row_icon_button(ui: &mut egui::Ui, glyph: &str, color: egui::Color32) -> egui::Response {
+    ui.add(egui::Button::new(egui::RichText::new(glyph).color(color).size(14.0)).frame(false))
+}
+
 fn task_table(
     ui: &mut egui::Ui,
     tasks: &[&Task],
     selected: &mut Option<usize>,
     tab_selected: &std::collections::HashSet<ObjectId>,
-) {
+) -> Option<RowAction> {
     use crate::ui::theme::colors;
 
     if tasks.is_empty() {
@@ -1330,8 +1406,13 @@ fn task_table(
                     .size(11.0),
             );
         });
-        return;
+        return None;
     }
+
+    // Set by a row's hover-icon / status click; read once after the table draws.
+    // `Cell` so the nested `body`/`rows` closures can capture it by shared ref
+    // alongside the mutable `selected` cursor.
+    let action: std::cell::Cell<Option<RowAction>> = std::cell::Cell::new(None);
 
     egui_extras::TableBuilder::new(ui)
         .striped(true)
@@ -1347,124 +1428,192 @@ fn task_table(
                 let is_tab_sel = tab_selected.contains(&task.id);
 
                 row.col(|ui| {
-                    let rect = ui.max_rect();
+                    // Scope every auto-generated widget id in this cell by row so
+                    // the interactive status glyph / hover buttons don't clash
+                    // across rows (egui_extras cells don't row-scope ids for you).
+                    ui.push_id(row_index, |ui| {
+                        let rect = ui.max_rect();
 
-                    let response = ui.interact(rect, ui.id().with(row_index), Sense::click());
-                    if response.clicked() {
-                        *selected = Some(row_index);
-                    }
+                        let response = ui.interact(rect, ui.id().with(row_index), Sense::click());
+                        // Layer-independent hover test: stays true while the pointer is
+                        // over the action buttons drawn on top, so they don't flicker.
+                        let row_hovered = ui.rect_contains_pointer(rect);
+                        // True once any hover icon / status glyph consumes this frame's
+                        // click, so the row-select at the end doesn't also fire.
+                        let mut consumed = false;
 
-                    if is_cursor {
-                        ui.painter().rect_filled(rect, 3.0, colors::BLUE);
-                    } else if is_tab_sel {
-                        ui.painter().rect_filled(rect, 3.0, colors::TEAL_DIM);
-                    } else if response.hovered() {
-                        ui.painter().rect_filled(rect, 3.0, colors::SURFACE1);
-                    }
+                        if is_cursor {
+                            ui.painter().rect_filled(rect, 3.0, colors::BLUE);
+                        } else if is_tab_sel {
+                            ui.painter().rect_filled(rect, 3.0, colors::TEAL_DIM);
+                        } else if row_hovered {
+                            ui.painter().rect_filled(rect, 3.0, colors::SURFACE1);
+                        }
 
-                    ui.add_space(6.0);
+                        ui.add_space(6.0);
 
-                    let is_highlighted = is_cursor || is_tab_sel;
-                    // Title color: MANTLE on highlighted rows; TEXT normally; SUBTEXT0 for Completed.
-                    // Status color is expressed only through the status icon, not the title.
-                    let text_color = if is_highlighted {
-                        colors::MANTLE
-                    } else if task.status == crate::database::models::TaskStatus::Completed {
-                        colors::SUBTEXT0
-                    } else {
-                        colors::TEXT
-                    };
+                        let is_highlighted = is_cursor || is_tab_sel;
+                        // Title color: MANTLE on highlighted rows; TEXT normally; SUBTEXT0 for Completed.
+                        // Status color is expressed only through the status icon, not the title.
+                        let text_color = if is_highlighted {
+                            colors::MANTLE
+                        } else if task.status == crate::database::models::TaskStatus::Completed {
+                            colors::SUBTEXT0
+                        } else {
+                            colors::TEXT
+                        };
 
-                    use crate::ui::theme::icons;
-                    let status_sym = if is_tab_sel && !is_cursor {
-                        "✓"
-                    } else {
-                        match task.status {
+                        use crate::ui::theme::icons;
+                        let status_sym = if is_tab_sel && !is_cursor {
+                            "✓"
+                        } else {
+                            match task.status {
+                                crate::database::models::TaskStatus::NotStarted => {
+                                    icons::STATUS_NOT_STARTED
+                                }
+                                crate::database::models::TaskStatus::InProgress => {
+                                    icons::STATUS_IN_PROGRESS
+                                }
+                                crate::database::models::TaskStatus::OnHold => {
+                                    icons::STATUS_ON_HOLD
+                                }
+                                crate::database::models::TaskStatus::Completed => {
+                                    icons::STATUS_COMPLETED
+                                }
+                            }
+                        };
+                        let status_color = if is_highlighted {
+                            colors::MANTLE
+                        } else {
+                            crate::ui::theme::status_color(&task.status)
+                        };
+
+                        let priority_hint = match task.priority {
+                            Priority::Urgent => icons::PRIORITY_URGENT,
+                            Priority::Normal => "",
+                            Priority::Low => icons::PRIORITY_LOW,
+                        };
+                        let priority_color = if is_highlighted {
+                            colors::MANTLE
+                        } else {
+                            crate::ui::theme::priority_color(&task.priority)
+                        };
+
+                        let status_tip = match task.status {
                             crate::database::models::TaskStatus::NotStarted => {
-                                icons::STATUS_NOT_STARTED
+                                "Not started (s to change)"
                             }
                             crate::database::models::TaskStatus::InProgress => {
-                                icons::STATUS_IN_PROGRESS
+                                "In progress (s to change)"
                             }
-                            crate::database::models::TaskStatus::OnHold => icons::STATUS_ON_HOLD,
+                            crate::database::models::TaskStatus::OnHold => "On hold (s to change)",
                             crate::database::models::TaskStatus::Completed => {
-                                icons::STATUS_COMPLETED
+                                "Completed (s to change)"
                             }
-                        }
-                    };
-                    let status_color = if is_highlighted {
-                        colors::MANTLE
-                    } else {
-                        crate::ui::theme::status_color(&task.status)
-                    };
+                        };
+                        let priority_tip = match task.priority {
+                            Priority::Urgent => "Urgent priority",
+                            Priority::Normal => "",
+                            Priority::Low => "Low priority",
+                        };
+                        let render_row = |ui: &mut egui::Ui, consumed: &mut bool| {
+                            // Status glyph is clickable → open the status picker for
+                            // this task (mouse parity with the `s` keybind).
+                            let status_resp = ui
+                                .add(
+                                    egui::Label::new(
+                                        egui::RichText::new(status_sym.to_string())
+                                            .color(status_color),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                )
+                                .on_hover_text(status_tip);
+                            if status_resp.clicked() {
+                                action.set(Some(RowAction::Status(task.id)));
+                                *consumed = true;
+                            }
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(format!("  {}", task.title))
+                                        .color(text_color),
+                                )
+                                .truncate(),
+                            );
+                            if !priority_hint.is_empty() {
+                                ui.label(egui::RichText::new(priority_hint).color(priority_color))
+                                    .on_hover_text(priority_tip);
+                            }
+                        };
 
-                    let priority_hint = match task.priority {
-                        Priority::Urgent => icons::PRIORITY_URGENT,
-                        Priority::Normal => "",
-                        Priority::Low => icons::PRIORITY_LOW,
-                    };
-                    let priority_color = if is_highlighted {
-                        colors::MANTLE
-                    } else {
-                        crate::ui::theme::priority_color(&task.priority)
-                    };
-
-                    let status_tip = match task.status {
-                        crate::database::models::TaskStatus::NotStarted => {
-                            "Not started (s to change)"
-                        }
-                        crate::database::models::TaskStatus::InProgress => {
-                            "In progress (s to change)"
-                        }
-                        crate::database::models::TaskStatus::OnHold => "On hold (s to change)",
-                        crate::database::models::TaskStatus::Completed => "Completed (s to change)",
-                    };
-                    let priority_tip = match task.priority {
-                        Priority::Urgent => "Urgent priority",
-                        Priority::Normal => "",
-                        Priority::Low => "Low priority",
-                    };
-                    let render_row = |ui: &mut egui::Ui| {
-                        ui.label(egui::RichText::new(status_sym.to_string()).color(status_color))
-                            .on_hover_text(status_tip);
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!("  {}", task.title)).color(text_color),
-                            )
-                            .truncate(),
-                        );
-                        if !priority_hint.is_empty() {
-                            ui.label(egui::RichText::new(priority_hint).color(priority_color))
-                                .on_hover_text(priority_tip);
-                        }
-                    };
-
-                    if let Some(ref due) = task.due {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.add_space(6.0);
-                            let due_color = if is_highlighted {
-                                colors::MANTLE
-                            } else {
-                                due_date_color(due)
-                            };
-                            ui.label(
-                                egui::RichText::new(format_due_short(due))
-                                    .color(due_color)
-                                    .size(11.0),
-                            );
+                            // On hover, the right edge shows the action icons (edit /
+                            // complete / delete) in place of the due date; otherwise
+                            // the due date. Same rect either way, so no layout jump
+                            // fights the buttons for the pointer.
+                            if row_hovered {
+                                // On highlighted rows (BLUE / TEAL_DIM fill) the semantic
+                                // icon colors would wash out — notably a BLUE edit icon on
+                                // the BLUE cursor row — so fall back to MANTLE like the
+                                // rest of the row's content does.
+                                let (c_delete, c_complete, c_edit) = if is_highlighted {
+                                    (colors::MANTLE, colors::MANTLE, colors::MANTLE)
+                                } else {
+                                    (colors::RED, colors::GREEN, colors::BLUE)
+                                };
+                                // right_to_left: first added sits rightmost.
+                                if row_icon_button(ui, icons::DELETE, c_delete)
+                                    .on_hover_text("Delete (Shift+D)")
+                                    .clicked()
+                                {
+                                    action.set(Some(RowAction::Delete(task.id)));
+                                    consumed = true;
+                                }
+                                if row_icon_button(ui, icons::STATUS_COMPLETED, c_complete)
+                                    .on_hover_text("Complete (d)")
+                                    .clicked()
+                                {
+                                    action.set(Some(RowAction::Complete(task.id)));
+                                    consumed = true;
+                                }
+                                if row_icon_button(ui, icons::MODE_INSERT, c_edit)
+                                    .on_hover_text("Edit (e)")
+                                    .clicked()
+                                {
+                                    action.set(Some(RowAction::Edit(task.id)));
+                                    consumed = true;
+                                }
+                            } else if let Some(ref due) = task.due {
+                                let due_color = if is_highlighted {
+                                    colors::MANTLE
+                                } else {
+                                    due_date_color(due)
+                                };
+                                ui.label(
+                                    egui::RichText::new(format_due_short(due))
+                                        .color(due_color)
+                                        .size(11.0),
+                                );
+                            }
                             ui.with_layout(
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
-                                    render_row(ui);
+                                    render_row(ui, &mut consumed);
                                 },
                             );
                         });
-                    } else {
-                        render_row(ui);
-                    }
+
+                        // Row click selects the cursor — but not when an icon / status
+                        // glyph already consumed the click on this row.
+                        if response.clicked() && !consumed {
+                            *selected = Some(row_index);
+                        }
+                    });
                 });
             });
         });
+
+    action.into_inner()
 }
 
 #[cfg(test)]
@@ -1561,5 +1710,337 @@ mod tests {
             UpdateMessage::Tasks(tasks) => assert_eq!(tasks[0].title, "injected task"),
             other => panic!("unexpected message: {:?}", other),
         }
+    }
+
+    // --- id-clash ("red box") detection for the task table ---
+
+    /// Recursively collect the text of any galley egui painted, so we can spot
+    /// the id-clash debug overlay ("🔥 … use of widget ID …").
+    fn collect_text(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::epaint::Shape::Text(t) => out.push(t.galley.text().to_string()),
+            egui::epaint::Shape::Vec(v) => {
+                for s in v {
+                    collect_text(s, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Render the real `task_table` headlessly and return any id-clash overlay
+    /// strings egui painted. `hover` optionally places the pointer to exercise
+    /// the on-hover action-icon path.
+    fn clash_texts(hover: Option<egui::Pos2>) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let tasks: Vec<Task> = (0..4)
+            .map(|i| Task {
+                title: format!("task {i}"),
+                order: (i as u64 + 1) * 1000,
+                status: match i {
+                    0 => crate::database::models::TaskStatus::NotStarted,
+                    1 => crate::database::models::TaskStatus::InProgress,
+                    2 => crate::database::models::TaskStatus::OnHold,
+                    _ => crate::database::models::TaskStatus::Completed,
+                },
+                priority: match i {
+                    0 => Priority::Urgent,
+                    3 => Priority::Low,
+                    _ => Priority::Normal,
+                },
+                ..Default::default()
+            })
+            .collect();
+        let refs: Vec<&Task> = tasks.iter().collect();
+        let empty = std::collections::HashSet::new();
+
+        // Run several frames; layout/ids stabilize after the first, and the
+        // clash check compares within a single frame's used-id set.
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(p) = hover {
+                input.events.push(egui::Event::PointerMoved(p));
+            }
+            let mut selected = Some(0usize);
+            let full = ctx.run_ui(input, |ui| {
+                let _ = task_table(ui, &refs, &mut selected, &empty);
+            });
+            out.clear();
+            for cs in &full.shapes {
+                collect_text(&cs.shape, &mut out);
+            }
+        }
+        out.into_iter()
+            .filter(|s| s.contains("widget ID") || s.contains("use of"))
+            .collect()
+    }
+
+    #[test]
+    fn task_table_has_no_id_clash_static() {
+        let clashes = clash_texts(None);
+        assert!(
+            clashes.is_empty(),
+            "id clashes on static render: {clashes:?}"
+        );
+    }
+
+    #[test]
+    fn task_table_has_no_id_clash_on_hover() {
+        // Pointer over the first row (row height 26, table near top of panel).
+        let clashes = clash_texts(Some(egui::pos2(200.0, 20.0)));
+        assert!(clashes.is_empty(), "id clashes on hover: {clashes:?}");
+    }
+
+    /// Build a headless `FastTask` backed by a temp DB and pre-seeded with 4
+    /// tasks. Skips `FastTask::default` and `ProjectManager::default` because both
+    /// force-open the *real* database (and panic if it's locked by a running
+    /// instance). Returns the app plus the TempDir guard (keep it alive).
+    fn build_test_app(show_detail_pane: bool) -> (crate::ui::app::FastTask, tempfile::TempDir) {
+        use crate::database::database::Db;
+        use crate::ui::app::{AppState, AppType, BackendManager, FastTask, Mode, WindowState};
+        use crate::ui::projects::{ProjectManager, ProjectWriter, assemble_project_list};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Db::open_path(dir.path().join("t.db")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let project_manager = ProjectManager {
+            projects: assemble_project_list(Vec::new()),
+            current_project: 0,
+            hovered_project: 0,
+            writer: ProjectWriter::default(),
+        };
+
+        let tasks: Vec<Task> = (0..4)
+            .map(|i| Task {
+                title: format!("task {i}"),
+                details: "some details".to_string(),
+                order: (i as u64 + 1) * 1000,
+                due: Some(polodb_core::bson::DateTime::now()),
+                ..Default::default()
+            })
+            .collect();
+
+        let mut app = FastTask {
+            project_manager,
+            task_manager: Default::default(),
+            backend_manager: BackendManager {
+                tx,
+                rx,
+                backend: std::sync::Arc::new(db),
+            },
+            app_state: AppState {
+                mode: Mode::Normal,
+                window_state: WindowState::Tasks,
+                pending_delete: None,
+                show_detail_pane,
+                show_help: false,
+                always_on_top: false,
+                init: false,
+                status_msg: None,
+            },
+            app_type: AppType::Native,
+            local_share: false,
+            err_ui: Default::default(),
+            known_tags: Vec::new(),
+            annotations: Vec::new(),
+            annotation_task_id: None,
+            annotation_buf: String::new(),
+        };
+        app.task_manager.tasks = tasks;
+        app.task_manager.visible_cache = vec![0, 1, 2, 3];
+        app.task_manager.current = Some(0);
+        (app, dir)
+    }
+
+    /// Collect id-clash overlay strings from a headless render closure.
+    fn clashes_from(
+        mut render: impl FnMut(&mut egui::Ui),
+        hover: Option<egui::Pos2>,
+    ) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(p) = hover {
+                input.events.push(egui::Event::PointerMoved(p));
+            }
+            let full = ctx.run_ui(input, |ui| render(ui));
+            out.clear();
+            for cs in &full.shapes {
+                collect_text(&cs.shape, &mut out);
+            }
+        }
+        out.into_iter()
+            .filter(|s| s.contains("widget ID") || s.contains("use of"))
+            .collect()
+    }
+
+    /// Render the real full app frame (top panel + status bar + task view) via
+    /// `App::ui`, and return any id-clash overlay strings.
+    fn full_frame_clash_texts(show_detail_pane: bool, hover: Option<egui::Pos2>) -> Vec<String> {
+        use eframe::App;
+        let (mut app, _dir) = build_test_app(show_detail_pane);
+        let mut frame = eframe::Frame::_new_kittest();
+        clashes_from(move |ui| app.ui(ui, &mut frame), hover)
+    }
+
+    /// Render the real `task_state` (task list + bottom detail pane + mode
+    /// dispatch) headlessly and return any id-clash overlay strings. This is the
+    /// full "task rows" surface the user reported red boxes on. Uses a temp DB so
+    /// it never touches the real one (skips `FastTask::default`, which opens it).
+    fn task_state_clash_texts(show_detail_pane: bool, hover: Option<egui::Pos2>) -> Vec<String> {
+        let (mut app, _dir) = build_test_app(show_detail_pane);
+        let ctx = egui::Context::default();
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(p) = hover {
+                input.events.push(egui::Event::PointerMoved(p));
+            }
+            let full = ctx.run_ui(input, |ui| {
+                let _ = task_state(ui, &mut app);
+            });
+            out.clear();
+            for cs in &full.shapes {
+                collect_text(&cs.shape, &mut out);
+            }
+        }
+        out.into_iter()
+            .filter(|s| s.contains("widget ID") || s.contains("use of"))
+            .collect()
+    }
+
+    #[test]
+    fn full_frame_no_clash_detail_on() {
+        // Detail pane on (Shift+K state) + hovering a task row: the exact
+        // conditions reported as producing red boxes.
+        let clashes = full_frame_clash_texts(true, Some(egui::pos2(200.0, 120.0)));
+        assert!(
+            clashes.is_empty(),
+            "full frame clashes (detail on): {clashes:?}"
+        );
+    }
+
+    #[test]
+    fn full_frame_no_clash_detail_off() {
+        let clashes = full_frame_clash_texts(false, Some(egui::pos2(200.0, 120.0)));
+        assert!(
+            clashes.is_empty(),
+            "full frame clashes (detail off): {clashes:?}"
+        );
+    }
+
+    #[test]
+    fn task_state_no_clash_with_detail_pane() {
+        let clashes = task_state_clash_texts(true, Some(egui::pos2(200.0, 40.0)));
+        assert!(
+            clashes.is_empty(),
+            "task_state clashes (detail on): {clashes:?}"
+        );
+    }
+
+    #[test]
+    fn task_state_no_clash_without_detail_pane() {
+        let clashes = task_state_clash_texts(false, Some(egui::pos2(200.0, 40.0)));
+        assert!(
+            clashes.is_empty(),
+            "task_state clashes (detail off): {clashes:?}"
+        );
+    }
+
+    /// Two `task_card`s in one frame (e.g. detail pane + Info pane) — their
+    /// fixed `Grid`/`ScrollArea` ids would clash if not scoped per call site.
+    #[test]
+    fn two_task_cards_do_not_clash() {
+        let ctx = egui::Context::default();
+        let task = Task {
+            title: "card".to_string(),
+            details: "some details".to_string(),
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let full = ctx.run_ui(input, |ui| {
+                egui::Panel::top("a").show_inside(ui, |ui| task_card(ui, &task));
+                egui::CentralPanel::default().show_inside(ui, |ui| task_card(ui, &task));
+            });
+            out.clear();
+            for cs in &full.shapes {
+                collect_text(&cs.shape, &mut out);
+            }
+        }
+        let clashes: Vec<_> = out
+            .into_iter()
+            .filter(|s| s.contains("widget ID") || s.contains("use of"))
+            .collect();
+        assert!(clashes.is_empty(), "two task_cards clash: {clashes:?}");
+    }
+
+    /// Sanity check that the clash detector actually detects clashes: two grids
+    /// with the same id in the *same* ui must trip it. If this ever passes, the
+    /// other "no clash" tests are false negatives and can't be trusted.
+    #[test]
+    fn detector_catches_a_known_clash() {
+        let ctx = egui::Context::default();
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            };
+            let full = ctx.run_ui(input, |ui| {
+                egui::Grid::new("dup").show(ui, |ui| {
+                    ui.label("a");
+                    ui.end_row();
+                });
+                ui.add_space(40.0);
+                egui::Grid::new("dup").show(ui, |ui| {
+                    ui.label("b");
+                    ui.end_row();
+                });
+            });
+            out.clear();
+            for cs in &full.shapes {
+                collect_text(&cs.shape, &mut out);
+            }
+        }
+        let clashes: Vec<_> = out
+            .into_iter()
+            .filter(|s| s.contains("widget ID") || s.contains("use of"))
+            .collect();
+        assert!(
+            !clashes.is_empty(),
+            "detector FAILED to catch a deliberate clash — other tests are unreliable"
+        );
     }
 }

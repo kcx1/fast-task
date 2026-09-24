@@ -2,6 +2,7 @@ pub mod app;
 pub mod tasks;
 pub mod theme;
 
+mod bg;
 mod info;
 mod keys;
 mod projects;

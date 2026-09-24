@@ -6,14 +6,21 @@ on:
   pull_request:
     branches: ["main"]
 
+# A new push to the same PR cancels the run it supersedes; pushes to main
+# always run to completion so they reliably save the cache PRs restore from.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
+  # No debuginfo in CI: smaller artifacts, faster linking, smaller cache.
+  CARGO_PROFILE_DEV_DEBUG: "0"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  ci:
+  test:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -33,11 +40,12 @@ jobs:
             mesa-vulkan-drivers
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
 
-      - name: Build
-        run: cargo build --verbose
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test
+          # Save even when the job fails, so a red run still warms the next one.
+          cache-on-failure: true
 
       - name: Run tests
         env:
@@ -77,6 +85,46 @@ jobs:
           echo "Tests failed (cargo exit $EXIT)"
           exit "$EXIT"
 
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint
+          # Save even when the job fails, so a red run still warms the next one.
+          cache-on-failure: true
 
       - name: Lint
-        run: cargo clippy --all-features -- -D warnings
+        run: cargo clippy --all-features --all-targets -- -D warnings
+
+  # Required status check gate. The "Main" ruleset requires a check named "ci";
+  # this job provides that context and passes only when both real jobs succeed.
+  # `if: always()` guarantees it always reports (pass/fail) instead of getting
+  # skipped — a skipped required check would leave PRs stuck "pending" forever.
+  ci:
+    if: always()
+    needs: [test, lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify test and lint passed
+        run: |
+          echo "test:  ${{ needs.test.result }}"
+          echo "lint:  ${{ needs.lint.result }}"
+          [ "${{ needs.test.result }}" = "success" ] && [ "${{ needs.lint.result }}" = "success" ]

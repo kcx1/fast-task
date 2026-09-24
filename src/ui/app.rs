@@ -176,7 +176,9 @@ fn load_icon() -> Option<std::sync::Arc<egui::IconData>> {
 
 /// tiny-skia outputs premultiplied RGBA; egui expects straight (unmultiplied) RGBA.
 fn unmultiply_alpha(data: Vec<u8>) -> Vec<u8> {
-    data.chunks_exact(4)
+    data.as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| {
             let a = p[3];
             if a == 0 {
@@ -274,8 +276,29 @@ impl eframe::App for FastTask {
         self.start_local_share();
 
         let mut dropdown_selected: Option<usize> = None;
+        // Deferred so the panel closure only borrows `self` immutably; applied
+        // after it returns (toggle needs `&mut self` for `refresh_tasks`).
+        let mut new_sort: Option<crate::ui::tasks::SortOrder> = None;
+        let mut toggle_completed = false;
 
         egui::Panel::top("Top Panel").show_inside(ui, |ui| {
+            use crate::ui::tasks::SortOrder;
+            use crate::ui::theme::{colors, icons};
+            // Selected dropdown items default to light text over the theme's
+            // translucent-blue selection, which reads as low-contrast white-on-
+            // blue. Give the popup a solid blue highlight with dark text instead.
+            let dropdown_item = |ui: &mut egui::Ui, selected: bool, text: String| -> bool {
+                if selected {
+                    ui.visuals_mut().selection.bg_fill = colors::BLUE;
+                }
+                let color = if selected {
+                    colors::MANTLE
+                } else {
+                    colors::TEXT
+                };
+                ui.selectable_label(selected, egui::RichText::new(text).color(color))
+                    .clicked()
+            };
             ui.horizontal(|ui| {
                 let current_project = match &self.project_manager.current() {
                     ProjectEntry::All => "All".to_string(),
@@ -288,16 +311,61 @@ impl eframe::App for FastTask {
                     .show_ui(ui, |ui| {
                         for (idx, project) in self.project_manager.projects.iter().enumerate() {
                             let selected = idx == self.project_manager.current_project;
-                            if ui.selectable_label(selected, project.to_string()).clicked() {
+                            if dropdown_item(ui, selected, project.to_string()) {
                                 dropdown_selected = Some(idx);
                             }
                         }
                     });
+
+                // Visually separate the project selector from the view controls.
+                ui.separator();
+
+                // Sort order — live control (was keyboard-only via Shift+S).
+                let current_sort = self.task_manager.sort_order.clone();
+                egui::ComboBox::new(egui::Id::new("SortDropdown"), "")
+                    .selected_text(format!("Sort: {}", current_sort.label()))
+                    .show_ui(ui, |ui| {
+                        for so in [
+                            SortOrder::Free,
+                            SortOrder::DueDate,
+                            SortOrder::Modified,
+                            SortOrder::Status,
+                            SortOrder::Tags,
+                        ] {
+                            let selected = so == current_sort;
+                            if dropdown_item(ui, selected, so.label().to_string()) {
+                                new_sort = Some(so);
+                            }
+                        }
+                    });
+
+                // Show-completed — live toggle (was keyboard-only via Shift+C).
+                // Icon-only to stay compact next to the two dropdowns; the
+                // tooltip names it and the selected state shows on/off.
+                let completed_on = self.task_manager.show_completed;
+                if ui
+                    .selectable_label(completed_on, icons::STATUS_COMPLETED)
+                    .on_hover_text(if completed_on {
+                        "Showing completed tasks — click to hide (Shift+C)"
+                    } else {
+                        "Show completed tasks (Shift+C)"
+                    })
+                    .clicked()
+                {
+                    toggle_completed = true;
+                }
             });
         });
 
         if let Some(idx) = dropdown_selected {
             self.select_project(idx);
+        }
+        if let Some(so) = new_sort {
+            self.task_manager.sort_order = so;
+        }
+        if toggle_completed {
+            self.task_manager.show_completed = !self.task_manager.show_completed;
+            self.refresh_tasks();
         }
 
         // Status bar — always visible
@@ -333,17 +401,9 @@ impl eframe::App for FastTask {
                             .size(11.0),
                     )
                     .on_hover_text(tip);
-                    ui.separator();
-                    let project_name = match self.project_manager.current() {
-                        ProjectEntry::All => "All".to_string(),
-                        ProjectEntry::None => "None".to_string(),
-                        ProjectEntry::Project(p) => p.name.clone(),
-                    };
-                    ui.label(
-                        egui::RichText::new(&project_name)
-                            .color(colors::SUBTEXT0)
-                            .size(11.0),
-                    );
+                    // Project name lives in the top-panel dropdown; sort and
+                    // show-completed are now top-panel controls — so the status
+                    // bar keeps only the mode and transient signals below.
 
                     // Show Tab-selection count when tasks are selected
                     let sel = self.task_manager.selected_tasks.len();
@@ -382,32 +442,6 @@ impl eframe::App for FastTask {
                         );
                     }
 
-                    if self.task_manager.show_completed {
-                        ui.separator();
-                        ui.label(
-                            egui::RichText::new("+ completed")
-                                .color(colors::GREEN)
-                                .size(11.0),
-                        )
-                        .on_hover_text("Showing completed tasks (Shift+C to toggle)");
-                    }
-
-                    {
-                        use crate::ui::tasks::SortOrder;
-                        if self.task_manager.sort_order != SortOrder::Free {
-                            ui.separator();
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "sort: {}",
-                                    self.task_manager.sort_order.label()
-                                ))
-                                .color(colors::TEAL)
-                                .size(11.0),
-                            )
-                            .on_hover_text("Active sort order (Shift+S to change)");
-                        }
-                    }
-
                     if self.app_state.always_on_top {
                         ui.separator();
                         ui.label(
@@ -416,6 +450,12 @@ impl eframe::App for FastTask {
                                 .size(11.0),
                         )
                         .on_hover_text("Window pinned above all others (Shift+A to toggle)");
+                    }
+
+                    if crate::ui::bg::busy(std::time::Duration::from_millis(150)) {
+                        ui.separator();
+                        ui.add(egui::Spinner::new().size(11.0).color(colors::OVERLAY1))
+                            .on_hover_text("Working…");
                     }
 
                     // Transient status message (Undone / Redone / Deleted hint)
@@ -519,7 +559,7 @@ impl FastTask {
 
     fn refresh_projects(&self) {
         let tx = self.backend_manager.tx.clone();
-        std::thread::spawn(move || match DB.all_projects() {
+        crate::ui::bg::spawn(move || match DB.all_projects() {
             Ok(real) => {
                 let projects = crate::ui::projects::assemble_project_list(real);
                 let _ = tx.send(UpdateMessage::Projects(projects));
@@ -555,7 +595,7 @@ impl FastTask {
 
     fn refresh_tags(&self) {
         let tx = self.backend_manager.tx.clone();
-        std::thread::spawn(move || {
+        crate::ui::bg::spawn(move || {
             if let Ok(tags) = DB.all_tags() {
                 let _ = tx.send(UpdateMessage::KnownTags(tags));
             }
@@ -573,7 +613,7 @@ impl FastTask {
             }
 
             let tx = self.backend_manager.tx.clone();
-            std::thread::spawn(move || {
+            crate::ui::bg::spawn(move || {
                 let entry = DB.get_recent_project().unwrap_or(ProjectEntry::All);
                 let _ = tx.send(UpdateMessage::CurrentProject(entry));
             });
