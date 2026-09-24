@@ -45,7 +45,8 @@ pub fn danger_button(ui: &mut Ui, text: impl Into<WidgetText>) -> Response {
     ui.add(btn)
 }
 
-/// Render a small colored status badge.
+/// Render a small colored status badge. The symbol is icon-only, so a hover
+/// tooltip names the status for anyone who doesn't recognize the glyph.
 pub fn status_badge(ui: &mut Ui, status: &crate::database::models::TaskStatus) {
     use crate::database::models::TaskStatus;
     use crate::ui::theme::icons;
@@ -55,6 +56,13 @@ pub fn status_badge(ui: &mut Ui, status: &crate::database::models::TaskStatus) {
         TaskStatus::Completed => icons::STATUS_COMPLETED,
         TaskStatus::OnHold => icons::STATUS_ON_HOLD,
     };
+    let name = match status {
+        TaskStatus::NotStarted => "Not started",
+        TaskStatus::InProgress => "In progress",
+        TaskStatus::Completed => "Completed",
+        TaskStatus::OnHold => "On hold",
+    };
     let color = crate::ui::theme::status_color(status);
-    ui.label(RichText::new(symbol).color(color));
+    ui.label(RichText::new(symbol).color(color))
+        .on_hover_text(name);
 }

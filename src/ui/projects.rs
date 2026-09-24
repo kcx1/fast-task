@@ -337,7 +337,7 @@ fn confirm_project(app: &mut FastTask, idx: usize) {
 }
 
 fn project_submit_create(name: String, tx: std::sync::mpsc::Sender<UpdateMessage>) {
-    std::thread::spawn(move || {
+    crate::ui::bg::spawn(move || {
         if let Err(e) = DB.create_project(Project::new(&name, None)) {
             let _ = tx.send(UpdateMessage::Error(e));
             return;
@@ -354,7 +354,7 @@ fn project_submit_create(name: String, tx: std::sync::mpsc::Sender<UpdateMessage
 }
 
 fn project_submit_delete(id: ObjectId, tx: std::sync::mpsc::Sender<UpdateMessage>) {
-    std::thread::spawn(move || {
+    crate::ui::bg::spawn(move || {
         if let Err(e) = DB.delete_project(id) {
             let _ = tx.send(UpdateMessage::Error(e));
             return;
@@ -374,7 +374,7 @@ fn project_submit_rename(
     project: crate::database::models::Project,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || {
+    crate::ui::bg::spawn(move || {
         if let Err(e) = DB.update_project(project) {
             let _ = tx.send(UpdateMessage::Error(e));
             return;
