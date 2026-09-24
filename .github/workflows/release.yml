@@ -53,13 +53,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BRANCH: chore/changelog-${{ github.ref_name }}
         run: |
-          gh pr view "$BRANCH" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+          if [ -z "$(gh pr list --repo "${{ github.repository }}" --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
             gh pr create \
               --repo "${{ github.repository }}" \
               --base main \
               --head "$BRANCH" \
               --title "docs: update CHANGELOG.md for ${{ github.ref_name }}" \
               --body "Automated changelog update for ${{ github.ref_name }}."
+          fi
           gh pr merge "$BRANCH" --repo "${{ github.repository }}" --squash --delete-branch
 
       - name: Clean up changelog branch on failure
