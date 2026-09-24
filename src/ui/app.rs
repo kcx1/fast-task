@@ -176,7 +176,9 @@ fn load_icon() -> Option<std::sync::Arc<egui::IconData>> {
 
 /// tiny-skia outputs premultiplied RGBA; egui expects straight (unmultiplied) RGBA.
 fn unmultiply_alpha(data: Vec<u8>) -> Vec<u8> {
-    data.chunks_exact(4)
+    data.as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| {
             let a = p[3];
             if a == 0 {
