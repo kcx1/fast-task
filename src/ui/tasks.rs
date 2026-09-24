@@ -1681,4 +1681,336 @@ mod tests {
             other => panic!("unexpected message: {:?}", other),
         }
     }
+
+    // --- id-clash ("red box") detection for the task table ---
+
+    /// Recursively collect the text of any galley egui painted, so we can spot
+    /// the id-clash debug overlay ("🔥 … use of widget ID …").
+    fn collect_text(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::epaint::Shape::Text(t) => out.push(t.galley.text().to_string()),
+            egui::epaint::Shape::Vec(v) => {
+                for s in v {
+                    collect_text(s, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Render the real `task_table` headlessly and return any id-clash overlay
+    /// strings egui painted. `hover` optionally places the pointer to exercise
+    /// the on-hover action-icon path.
+    fn clash_texts(hover: Option<egui::Pos2>) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let tasks: Vec<Task> = (0..4)
+            .map(|i| Task {
+                title: format!("task {i}"),
+                order: (i as u64 + 1) * 1000,
+                status: match i {
+                    0 => crate::database::models::TaskStatus::NotStarted,
+                    1 => crate::database::models::TaskStatus::InProgress,
+                    2 => crate::database::models::TaskStatus::OnHold,
+                    _ => crate::database::models::TaskStatus::Completed,
+                },
+                priority: match i {
+                    0 => Priority::Urgent,
+                    3 => Priority::Low,
+                    _ => Priority::Normal,
+                },
+                ..Default::default()
+            })
+            .collect();
+        let refs: Vec<&Task> = tasks.iter().collect();
+        let empty = std::collections::HashSet::new();
+
+        // Run several frames; layout/ids stabilize after the first, and the
+        // clash check compares within a single frame's used-id set.
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(p) = hover {
+                input.events.push(egui::Event::PointerMoved(p));
+            }
+            let mut selected = Some(0usize);
+            let full = ctx.run_ui(input, |ui| {
+                let _ = task_table(ui, &refs, &mut selected, &empty);
+            });
+            out.clear();
+            for cs in &full.shapes {
+                collect_text(&cs.shape, &mut out);
+            }
+        }
+        out.into_iter()
+            .filter(|s| s.contains("widget ID") || s.contains("use of"))
+            .collect()
+    }
+
+    #[test]
+    fn task_table_has_no_id_clash_static() {
+        let clashes = clash_texts(None);
+        assert!(
+            clashes.is_empty(),
+            "id clashes on static render: {clashes:?}"
+        );
+    }
+
+    #[test]
+    fn task_table_has_no_id_clash_on_hover() {
+        // Pointer over the first row (row height 26, table near top of panel).
+        let clashes = clash_texts(Some(egui::pos2(200.0, 20.0)));
+        assert!(clashes.is_empty(), "id clashes on hover: {clashes:?}");
+    }
+
+    /// Build a headless `FastTask` backed by a temp DB and pre-seeded with 4
+    /// tasks. Skips `FastTask::default` and `ProjectManager::default` because both
+    /// force-open the *real* database (and panic if it's locked by a running
+    /// instance). Returns the app plus the TempDir guard (keep it alive).
+    fn build_test_app(show_detail_pane: bool) -> (crate::ui::app::FastTask, tempfile::TempDir) {
+        use crate::database::database::Db;
+        use crate::ui::app::{AppState, AppType, BackendManager, FastTask, Mode, WindowState};
+        use crate::ui::projects::{ProjectManager, ProjectWriter, assemble_project_list};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Db::open_path(dir.path().join("t.db")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let project_manager = ProjectManager {
+            projects: assemble_project_list(Vec::new()),
+            current_project: 0,
+            hovered_project: 0,
+            writer: ProjectWriter::default(),
+        };
+
+        let tasks: Vec<Task> = (0..4)
+            .map(|i| Task {
+                title: format!("task {i}"),
+                details: "some details".to_string(),
+                order: (i as u64 + 1) * 1000,
+                due: Some(polodb_core::bson::DateTime::now()),
+                ..Default::default()
+            })
+            .collect();
+
+        let mut app = FastTask {
+            project_manager,
+            task_manager: Default::default(),
+            backend_manager: BackendManager {
+                tx,
+                rx,
+                backend: std::sync::Arc::new(db),
+            },
+            app_state: AppState {
+                mode: Mode::Normal,
+                window_state: WindowState::Tasks,
+                pending_delete: None,
+                show_detail_pane,
+                show_help: false,
+                always_on_top: false,
+                init: false,
+                status_msg: None,
+            },
+            app_type: AppType::Native,
+            local_share: false,
+            err_ui: Default::default(),
+            known_tags: Vec::new(),
+            annotations: Vec::new(),
+            annotation_task_id: None,
+            annotation_buf: String::new(),
+        };
+        app.task_manager.tasks = tasks;
+        app.task_manager.visible_cache = vec![0, 1, 2, 3];
+        app.task_manager.current = Some(0);
+        (app, dir)
+    }
+
+    /// Collect id-clash overlay strings from a headless render closure.
+    fn clashes_from(
+        mut render: impl FnMut(&mut egui::Ui),
+        hover: Option<egui::Pos2>,
+    ) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(p) = hover {
+                input.events.push(egui::Event::PointerMoved(p));
+            }
+            let full = ctx.run_ui(input, |ui| render(ui));
+            out.clear();
+            for cs in &full.shapes {
+                collect_text(&cs.shape, &mut out);
+            }
+        }
+        out.into_iter()
+            .filter(|s| s.contains("widget ID") || s.contains("use of"))
+            .collect()
+    }
+
+    /// Render the real full app frame (top panel + status bar + task view) via
+    /// `App::ui`, and return any id-clash overlay strings.
+    fn full_frame_clash_texts(show_detail_pane: bool, hover: Option<egui::Pos2>) -> Vec<String> {
+        use eframe::App;
+        let (mut app, _dir) = build_test_app(show_detail_pane);
+        let mut frame = eframe::Frame::_new_kittest();
+        clashes_from(move |ui| app.ui(ui, &mut frame), hover)
+    }
+
+    /// Render the real `task_state` (task list + bottom detail pane + mode
+    /// dispatch) headlessly and return any id-clash overlay strings. This is the
+    /// full "task rows" surface the user reported red boxes on. Uses a temp DB so
+    /// it never touches the real one (skips `FastTask::default`, which opens it).
+    fn task_state_clash_texts(show_detail_pane: bool, hover: Option<egui::Pos2>) -> Vec<String> {
+        let (mut app, _dir) = build_test_app(show_detail_pane);
+        let ctx = egui::Context::default();
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(p) = hover {
+                input.events.push(egui::Event::PointerMoved(p));
+            }
+            let full = ctx.run_ui(input, |ui| {
+                let _ = task_state(ui, &mut app);
+            });
+            out.clear();
+            for cs in &full.shapes {
+                collect_text(&cs.shape, &mut out);
+            }
+        }
+        out.into_iter()
+            .filter(|s| s.contains("widget ID") || s.contains("use of"))
+            .collect()
+    }
+
+    #[test]
+    fn full_frame_no_clash_detail_on() {
+        // Detail pane on (Shift+K state) + hovering a task row: the exact
+        // conditions reported as producing red boxes.
+        let clashes = full_frame_clash_texts(true, Some(egui::pos2(200.0, 120.0)));
+        assert!(
+            clashes.is_empty(),
+            "full frame clashes (detail on): {clashes:?}"
+        );
+    }
+
+    #[test]
+    fn full_frame_no_clash_detail_off() {
+        let clashes = full_frame_clash_texts(false, Some(egui::pos2(200.0, 120.0)));
+        assert!(
+            clashes.is_empty(),
+            "full frame clashes (detail off): {clashes:?}"
+        );
+    }
+
+    #[test]
+    fn task_state_no_clash_with_detail_pane() {
+        let clashes = task_state_clash_texts(true, Some(egui::pos2(200.0, 40.0)));
+        assert!(
+            clashes.is_empty(),
+            "task_state clashes (detail on): {clashes:?}"
+        );
+    }
+
+    #[test]
+    fn task_state_no_clash_without_detail_pane() {
+        let clashes = task_state_clash_texts(false, Some(egui::pos2(200.0, 40.0)));
+        assert!(
+            clashes.is_empty(),
+            "task_state clashes (detail off): {clashes:?}"
+        );
+    }
+
+    /// Two `task_card`s in one frame (e.g. detail pane + Info pane) — their
+    /// fixed `Grid`/`ScrollArea` ids would clash if not scoped per call site.
+    #[test]
+    fn two_task_cards_do_not_clash() {
+        let ctx = egui::Context::default();
+        let task = Task {
+            title: "card".to_string(),
+            details: "some details".to_string(),
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let full = ctx.run_ui(input, |ui| {
+                egui::Panel::top("a").show_inside(ui, |ui| task_card(ui, &task));
+                egui::CentralPanel::default().show_inside(ui, |ui| task_card(ui, &task));
+            });
+            out.clear();
+            for cs in &full.shapes {
+                collect_text(&cs.shape, &mut out);
+            }
+        }
+        let clashes: Vec<_> = out
+            .into_iter()
+            .filter(|s| s.contains("widget ID") || s.contains("use of"))
+            .collect();
+        assert!(clashes.is_empty(), "two task_cards clash: {clashes:?}");
+    }
+
+    /// Sanity check that the clash detector actually detects clashes: two grids
+    /// with the same id in the *same* ui must trip it. If this ever passes, the
+    /// other "no clash" tests are false negatives and can't be trusted.
+    #[test]
+    fn detector_catches_a_known_clash() {
+        let ctx = egui::Context::default();
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            };
+            let full = ctx.run_ui(input, |ui| {
+                egui::Grid::new("dup").show(ui, |ui| {
+                    ui.label("a");
+                    ui.end_row();
+                });
+                ui.add_space(40.0);
+                egui::Grid::new("dup").show(ui, |ui| {
+                    ui.label("b");
+                    ui.end_row();
+                });
+            });
+            out.clear();
+            for cs in &full.shapes {
+                collect_text(&cs.shape, &mut out);
+            }
+        }
+        let clashes: Vec<_> = out
+            .into_iter()
+            .filter(|s| s.contains("widget ID") || s.contains("use of"))
+            .collect();
+        assert!(
+            !clashes.is_empty(),
+            "detector FAILED to catch a deliberate clash — other tests are unreliable"
+        );
+    }
 }
