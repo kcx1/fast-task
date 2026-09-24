@@ -276,6 +276,97 @@ impl TagManagement for Db {
         }
         Ok(())
     }
+
+    fn tag_usage(&self) -> anyhow::Result<Vec<(String, usize)>> {
+        let mut usage: std::collections::BTreeMap<String, usize> =
+            self.all_tags()?.into_iter().map(|t| (t, 0)).collect();
+        for task in self.all_tasks()? {
+            // Count each tag once per task, case-insensitively.
+            let mut seen = std::collections::HashSet::new();
+            for tag in task.tags.iter().flatten() {
+                let key = normalize_tag(tag);
+                if !key.is_empty() && seen.insert(key.clone()) {
+                    *usage.entry(key).or_default() += 1;
+                }
+            }
+        }
+        Ok(usage.into_iter().collect())
+    }
+
+    fn rename_tag(&self, from: &str, to: &str) -> anyhow::Result<usize> {
+        let (from, to) = (normalize_tag(from), normalize_tag(to));
+        anyhow::ensure!(!to.is_empty(), "Tag name can't be empty");
+        if from == to {
+            return Ok(0);
+        }
+        let changed = self.rewrite_task_tags(&from, Some(&to))?;
+        self.remove_stored_tag(&from)?;
+        self.upsert_tags(std::slice::from_ref(&to))?;
+        Ok(changed)
+    }
+
+    fn delete_tag(&self, name: &str) -> anyhow::Result<usize> {
+        let name = normalize_tag(name);
+        let changed = self.rewrite_task_tags(&name, None)?;
+        self.remove_stored_tag(&name)?;
+        Ok(changed)
+    }
+}
+
+/// Tags are stored lowercased and trimmed; task tags keep the user's casing, so
+/// every comparison goes through this.
+fn normalize_tag(tag: &str) -> String {
+    tag.trim().to_lowercase()
+}
+
+impl Db {
+    fn all_tasks(&self) -> anyhow::Result<Vec<Task>> {
+        Ok(self
+            .instance
+            .collection::<Task>(TASK_COLLECTION)
+            .find(doc! {})
+            .run()?
+            .flatten()
+            .collect())
+    }
+
+    fn remove_stored_tag(&self, name: &str) -> anyhow::Result<()> {
+        self.instance
+            .collection::<Tag>(TAGS_COLLECTION)
+            .delete_many(doc! { "content": name })?;
+        Ok(())
+    }
+
+    /// Replace (or with `to = None`, drop) tag `from` on every task that has it,
+    /// de-duplicating in place. Goes through `update_task` so each change lands
+    /// in the undo history. Returns how many tasks changed.
+    fn rewrite_task_tags(&self, from: &str, to: Option<&str>) -> anyhow::Result<usize> {
+        let mut changed = 0;
+        for mut task in self.all_tasks()? {
+            let Some(tags) = &task.tags else { continue };
+            if !tags.iter().any(|t| normalize_tag(t) == from) {
+                continue;
+            }
+            let mut out: Vec<String> = Vec::with_capacity(tags.len());
+            for tag in tags {
+                let tag = if normalize_tag(tag) == from {
+                    match to {
+                        Some(to) => to.to_string(),
+                        None => continue,
+                    }
+                } else {
+                    tag.clone()
+                };
+                if !out.iter().any(|t| normalize_tag(t) == normalize_tag(&tag)) {
+                    out.push(tag);
+                }
+            }
+            task.tags = (!out.is_empty()).then_some(out);
+            self.update_task(task)?;
+            changed += 1;
+        }
+        Ok(changed)
+    }
 }
 
 /// Returns the canonical `$set` document for a task update.
@@ -546,6 +637,74 @@ mod tests {
             order: 1000,
             ..Default::default()
         }
+    }
+
+    // --- Tag management tests ---
+
+    fn tagged(title: &str, tags: &[&str]) -> Task {
+        Task {
+            title: title.to_string(),
+            order: 1000,
+            tags: Some(tags.iter().map(|t| t.to_string()).collect()),
+            ..Default::default()
+        }
+    }
+
+    fn tags_of(db: &Db, id: ObjectId) -> Option<Vec<String>> {
+        db.one_task(id).unwrap().unwrap().tags
+    }
+
+    #[test]
+    fn tag_usage_counts_tasks_case_insensitively_and_includes_unused() {
+        let (_dir, db) = test_db();
+        db.create_task(tagged("a", &["Work", "home"])).unwrap();
+        db.create_task(tagged("b", &["work", "WORK"])).unwrap();
+        db.upsert_tags(&["unused".to_string()]).unwrap();
+        let usage = db.tag_usage().unwrap();
+        assert_eq!(
+            usage,
+            vec![("home".into(), 1), ("unused".into(), 0), ("work".into(), 2)]
+        );
+    }
+
+    #[test]
+    fn rename_tag_updates_tasks_store_and_dedupes() {
+        let (_dir, db) = test_db();
+        let a = db.create_task(tagged("a", &["Work", "urgent"])).unwrap();
+        let b = db.create_task(tagged("b", &["job", "work"])).unwrap();
+        let c = db.create_task(tagged("c", &["home"])).unwrap();
+
+        assert_eq!(db.rename_tag("work", "Job").unwrap(), 2);
+        assert_eq!(tags_of(&db, a), Some(vec!["job".into(), "urgent".into()]));
+        assert_eq!(
+            tags_of(&db, b),
+            Some(vec!["job".into()]),
+            "merged, no duplicate"
+        );
+        assert_eq!(tags_of(&db, c), Some(vec!["home".into()]), "untouched");
+
+        let stored = db.all_tags().unwrap();
+        assert!(stored.contains(&"job".to_string()));
+        assert!(!stored.contains(&"work".to_string()));
+    }
+
+    #[test]
+    fn rename_tag_rejects_empty_name() {
+        let (_dir, db) = test_db();
+        db.create_task(tagged("a", &["work"])).unwrap();
+        assert!(db.rename_tag("work", "   ").is_err());
+    }
+
+    #[test]
+    fn delete_tag_removes_from_tasks_and_store() {
+        let (_dir, db) = test_db();
+        let a = db.create_task(tagged("a", &["work", "home"])).unwrap();
+        let b = db.create_task(tagged("b", &["Work"])).unwrap();
+
+        assert_eq!(db.delete_tag("work").unwrap(), 2);
+        assert_eq!(tags_of(&db, a), Some(vec!["home".into()]));
+        assert_eq!(tags_of(&db, b), None, "last tag removed → None");
+        assert!(!db.all_tags().unwrap().contains(&"work".to_string()));
     }
 
     // --- Migration tests ---

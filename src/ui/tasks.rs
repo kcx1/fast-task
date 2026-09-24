@@ -165,8 +165,12 @@ pub struct TaskManager {
     pub sort_order: SortOrder,
     pub sort_picker_open: bool,
     pub sort_picker_cursor: usize,
-    /// Highlighted tag autocomplete suggestion in the editor (keyboard nav).
+    /// Highlighted tag completion; `None` = not moved yet (top item is highlighted).
     pub tag_suggestion_idx: Option<usize>,
+    /// Text the completion menu was last built for; a change resets the menu.
+    pub tag_menu_query: String,
+    /// Menu closed with Esc / Ctrl+E; reopens once the text changes.
+    pub tag_menu_dismissed: bool,
     /// Filtered indices into `tasks`, recomputed once per frame via
     /// `refresh_visible_cache`. Read by `real_index`/`get_current_task` so they
     /// don't rebuild the list (and re-syscall the clock) on every call.
@@ -2036,6 +2040,7 @@ mod tests {
             annotation_task_id: None,
             annotation_buf: String::new(),
             annotation_cursor: None,
+            tag_ui: Default::default(),
         };
         app.task_manager.tasks = tasks;
         app.task_manager.visible_cache = vec![0, 1, 2, 3];
@@ -2494,5 +2499,187 @@ mod tests {
         press(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
         assert!(!app.err_ui.has_non_fatal());
         assert_eq!(window(&app), "tasks", "Esc was spent on the banner");
+    }
+
+    // --- tag completion (persistent Context so focus carries across frames) ---
+
+    struct Harness {
+        ctx: egui::Context,
+        app: crate::ui::app::FastTask,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Harness {
+        fn editor(known: &[&str]) -> Self {
+            let (mut app, dir) = build_test_app(false);
+            app.app_state.mode = crate::ui::app::Mode::Insert(None);
+            app.app_state.window_state = crate::ui::app::WindowState::Info;
+            app.known_tags = known.iter().map(|t| t.to_string()).collect();
+            let mut h = Self {
+                ctx: egui::Context::default(),
+                app,
+                _dir: dir,
+            };
+            h.frame(vec![]);
+            h.ctx
+                .memory_mut(|m| m.request_focus(egui::Id::new("tag_input")));
+            h.frame(vec![]);
+            h
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) {
+            use eframe::App;
+            let mut frame = eframe::Frame::_new_kittest();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(500.0, 900.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let app = &mut self.app;
+            let _ = self.ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        }
+
+        fn key(&mut self, key: egui::Key, modifiers: egui::Modifiers) {
+            self.frame(vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }]);
+            self.frame(vec![]);
+        }
+
+        fn type_text(&mut self, text: &str) {
+            self.frame(vec![egui::Event::Text(text.to_string())]);
+            // One idle frame so the menu is open and the focus lock is in place.
+            self.frame(vec![]);
+        }
+
+        fn buf(&self) -> &str {
+            &self.app.task_manager.writer.tags_buffer
+        }
+
+        fn tag_focused(&self) -> bool {
+            self.ctx.memory(|m| m.has_focus(egui::Id::new("tag_input")))
+        }
+    }
+
+    #[test]
+    fn tab_accepts_fuzzy_match_and_keeps_focus() {
+        let mut h = Harness::editor(&["work", "home", "homework"]);
+        assert!(h.tag_focused(), "precondition: tag field focused");
+        h.type_text("wk");
+        h.key(egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(h.buf(), "work, ");
+        assert!(h.tag_focused(), "Tab must not move focus into the menu");
+    }
+
+    #[test]
+    fn arrow_then_enter_accepts_second_item() {
+        let mut h = Harness::editor(&["home", "homework"]);
+        h.type_text("ho");
+        h.key(egui::Key::ArrowDown, egui::Modifiers::NONE);
+        h.key(egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(h.buf(), "homework, ");
+        assert!(h.tag_focused());
+        assert!(
+            matches!(h.app.app_state.mode, crate::ui::app::Mode::Insert(_)),
+            "Enter on a highlighted item must not submit the form"
+        );
+    }
+
+    #[test]
+    fn esc_closes_menu_without_leaving_field_or_discarding() {
+        let mut h = Harness::editor(&["work"]);
+        h.type_text("wo");
+        h.key(egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(h.app.task_manager.tag_menu_dismissed);
+        assert!(h.tag_focused());
+        assert!(matches!(
+            h.app.app_state.mode,
+            crate::ui::app::Mode::Insert(_)
+        ));
+        // With the menu closed, Tab is plain focus traversal again.
+        h.key(egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(h.buf(), "wo");
+        assert!(!h.tag_focused());
+    }
+
+    #[test]
+    fn already_typed_tags_are_not_suggested_again() {
+        let mut h = Harness::editor(&["work", "workshop"]);
+        h.type_text("work, wor");
+        h.key(egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(h.buf(), "work, workshop, ");
+    }
+
+    // --- tag manager popup ---
+
+    #[test]
+    fn shift_t_opens_tag_manager_and_it_swallows_keys() {
+        let (mut app, _dir) = build_test_app(false);
+        press(&mut app, egui::Key::T, egui::Modifiers::SHIFT);
+        assert!(app.tag_ui.open);
+        assert_eq!(
+            window(&app),
+            "tasks",
+            "Shift+T is not the plain `t` pane jump"
+        );
+
+        app.task_manager.current = Some(0);
+        press(&mut app, egui::Key::J, egui::Modifiers::NONE);
+        assert_eq!(
+            app.task_manager.current,
+            Some(0),
+            "j went to the popup, not the list"
+        );
+        press(&mut app, egui::Key::O, egui::Modifiers::NONE);
+        assert_eq!(
+            app.tag_ui.mode,
+            crate::ui::tags::TagUiMode::New(String::new()),
+            "o starts a new tag instead of adding a task"
+        );
+        assert!(!matches!(
+            app.app_state.mode,
+            crate::ui::app::Mode::Insert(_)
+        ));
+        press(&mut app, egui::Key::Escape, egui::Modifiers::NONE); // cancel name entry
+        press(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.tag_ui.open);
+        assert_eq!(window(&app), "tasks", "Esc closed the popup only");
+    }
+
+    #[test]
+    fn tag_manager_rename_and_delete_flow() {
+        use crate::ui::tags::TagUiMode;
+        let (mut app, _dir) = build_test_app(false);
+        app.tag_ui.open = true;
+        app.tag_ui.rows = vec![("home".into(), 1), ("work".into(), 2)];
+
+        press(&mut app, egui::Key::J, egui::Modifiers::NONE);
+        assert_eq!(app.tag_ui.cursor, 1);
+        press(&mut app, egui::Key::E, egui::Modifiers::NONE);
+        assert_eq!(
+            app.tag_ui.mode,
+            TagUiMode::Rename {
+                from: "work".into(),
+                buf: "work".into()
+            }
+        );
+        press(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(app.tag_ui.mode, TagUiMode::Browse);
+        assert!(
+            app.tag_ui.open,
+            "Esc in the name field cancels, doesn't close"
+        );
+
+        press(&mut app, egui::Key::D, egui::Modifiers::NONE);
+        assert_eq!(app.tag_ui.mode, TagUiMode::ConfirmDelete("work".into()));
+        press(&mut app, egui::Key::N, egui::Modifiers::NONE);
+        assert_eq!(app.tag_ui.mode, TagUiMode::Browse);
     }
 }
