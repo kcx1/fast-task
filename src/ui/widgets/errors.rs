@@ -61,6 +61,15 @@ impl ErrorUi {
         self
     }
 
+    pub fn has_non_fatal(&self) -> bool {
+        !self.non_fatal.is_empty()
+    }
+
+    /// Dismiss the most recent non-fatal banner. Returns `false` if there were none.
+    pub fn dismiss_latest_non_fatal(&mut self) -> bool {
+        self.non_fatal.pop().is_some()
+    }
+
     /// Call every frame inside the egui update loop.
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
@@ -182,7 +191,7 @@ impl ErrorUi {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if common::secondary_button(ui, "✕")
-                                            .on_hover_text("Dismiss")
+                                            .on_hover_text("Dismiss (Esc)")
                                             .clicked()
                                         {
                                             to_remove.push(i);

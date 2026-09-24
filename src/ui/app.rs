@@ -1,4 +1,3 @@
-use crate::database::Database;
 use crate::database::ProjectManagement;
 use crate::database::TagManagement;
 use crate::database::TaskManagement;
@@ -19,7 +18,19 @@ use crate::ui::projects::{ProjectManager, project_state};
 use crate::ui::tasks::{TaskManager, get_tasks, task_state};
 use crate::ui::widgets::errors::{ErrorSeverity, ErrorUi};
 
+#[cfg(test)]
 pub static DB: LazyLock<Db> = LazyLock::new(|| {
+    // Tests that render real panes (e.g. the Info pane's note fetch) reach this
+    // global; point it at a throwaway per-process DB so they never open — or
+    // migrate — the user's real database.
+    let dir = std::env::temp_dir().join(format!("fast-task-test-db-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create test DB dir");
+    Db::open_path(dir.join("t.db")).expect("open test DB")
+});
+
+#[cfg(not(test))]
+pub static DB: LazyLock<Db> = LazyLock::new(|| {
+    use crate::database::Database;
     Db::open().unwrap_or_else(|e| {
         panic!(
             "Failed to open database at {:?}: {}\n\
@@ -70,6 +81,8 @@ pub struct FastTask {
     pub annotation_task_id: Option<polodb_core::bson::oid::ObjectId>,
     /// Draft text for a new annotation being composed.
     pub annotation_buf: String,
+    /// Keyboard-highlighted note in the Info pane (`j` / `k`, `x` deletes).
+    pub annotation_cursor: Option<usize>,
 }
 impl Default for FastTask {
     fn default() -> Self {
@@ -108,6 +121,7 @@ impl Default for FastTask {
             annotations: Vec::new(),
             annotation_task_id: None,
             annotation_buf: String::new(),
+            annotation_cursor: None,
             app_type,
         }
     }
@@ -492,6 +506,13 @@ impl eframe::App for FastTask {
         // Gate all global keybinds while any text widget has keyboard focus so that typing
         // in e.g. the annotation input doesn't fire navigation or undo/redo actions.
         if !ui.ctx().egui_wants_keyboard_input() {
+            // Esc dismisses the newest error banner before it does anything else
+            // (leave mode, clear filter, change pane).
+            if self.err_ui.has_non_fatal()
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            {
+                self.err_ui.dismiss_latest_non_fatal();
+            }
             if toggle_help(ui) {
                 self.app_state.show_help = !self.app_state.show_help;
             }
@@ -707,21 +728,38 @@ fn show_help_popup(ctx: &egui::Context, mode: &Mode, window: &WindowState, show:
             ("d", "Delete hovered project"),
             ("", ""),
             ("View", ""),
-            ("t", "Go to Tasks pane"),
+            ("Shift+L / t", "Go to Tasks pane"),
+            ("?", "Toggle this help"),
+        ],
+        (Mode::Normal, WindowState::Info) => &[
+            ("Info pane", ""),
+            ("i / e", "Edit this task"),
+            ("a", "Add a note (Enter saves, Esc cancels)"),
+            ("j / k  or  ↓ / ↑", "Highlight next / previous note"),
+            ("x", "Delete highlighted note"),
+            ("", ""),
+            ("View", ""),
+            ("Shift+H / Esc", "Back to Tasks pane"),
+            ("u / r", "Undo / Redo"),
             ("?", "Toggle this help"),
         ],
         (Mode::Normal, _) => &[
             ("Navigation", ""),
-            ("j / k", "Move cursor down / up"),
+            ("j / k  or  ↓ / ↑", "Move cursor down / up"),
+            ("gg / Shift+G", "Jump to top / bottom"),
+            ("Ctrl+D / Ctrl+U", "Half page down / up"),
+            ("Enter", "Open task in Info pane"),
+            ("[ / ]", "Previous / next project"),
             ("", ""),
             ("Tasks", ""),
             ("o / O", "New task below / above"),
             ("i / e", "Edit selected task"),
-            ("y", "Yank (copy) task"),
-            ("p", "Paste yanked task below cursor (or go to Projects)"),
+            ("y", "Yank (copy) task or selection"),
+            ("p / Shift+P", "Paste yanked task(s) below / above"),
             ("d", "Mark complete (remove from view)"),
             ("Shift+D", "Hard delete task"),
             ("s", "Set status (popup picker)"),
+            ("+ / -", "Raise / lower priority"),
             ("Tab", "Toggle task in selection set (Esc to clear)"),
             ("", ""),
             ("Modes", ""),
@@ -732,30 +770,43 @@ fn show_help_popup(ctx: &egui::Context, mode: &Mode, window: &WindowState, show:
             ("Shift+K", "Toggle detail pane"),
             ("Shift+C", "Show / hide completed tasks"),
             ("Shift+A", "Toggle always-on-top"),
+            (
+                "Shift+H / Shift+L",
+                "Previous / next pane (Projects ↔ Tasks ↔ Info)",
+            ),
             ("t", "Go to Tasks pane"),
-            ("p (no clipboard)", "Go to Projects pane"),
             ("u / r", "Undo / Redo"),
             ("?", "Toggle this help"),
             ("", ""),
             ("Filter", ""),
             ("/", "Open filter bar"),
             ("Enter", "Confirm filter (bar hides, list stays narrow)"),
-            ("Esc", "Clear filter / selection and close bar"),
+            (
+                "Esc",
+                "Dismiss error, then clear selection, then filter, then go to Projects",
+            ),
         ],
         (Mode::Insert(_), _) => &[
             ("Task Editor", ""),
             ("Enter", "Save and return to Tasks"),
+            ("Ctrl/Cmd+Enter", "Save & Done (mark completed)"),
             ("Shift+Enter", "Insert newline in Details field"),
+            ("Tab / Shift+Tab", "Next / previous field"),
+            ("Space", "Press the focused button / toggle checkbox"),
             ("Esc", "Clear field focus / Discard (press twice)"),
         ],
         (Mode::Visual, _) => &[
             ("Visual Mode  (single task)", ""),
-            ("j / k", "Move cursor"),
+            ("j / k  or  ↓ / ↑", "Move cursor"),
+            ("gg / Shift+G", "Jump to top / bottom"),
+            ("Ctrl+D / Ctrl+U", "Half page down / up"),
             ("Shift+J", "Move task down in list"),
             ("Shift+K", "Move task up in list"),
             ("d / Shift+D", "Complete / delete task"),
             ("s", "Set status (popup picker)"),
             ("i / e", "Edit task"),
+            ("y", "Yank (copy) task"),
+            ("p / Shift+P", "Paste yanked task(s) below / above"),
             ("Esc", "Return to Normal"),
         ],
     };
