@@ -433,6 +433,7 @@ fn task_set_doc(task: &Task) -> anyhow::Result<bson::Document> {
         "priority":    &task.priority,
         "tags":        &task.tags,
         "recurrence":  to_bson(&task.recurrence)?,
+        "language":    to_bson(&task.language)?,
     })
 }
 

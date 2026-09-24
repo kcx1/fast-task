@@ -7,7 +7,7 @@ use polodb_core::bson::DateTime;
 use polodb_core::bson::oid::ObjectId;
 
 use crate::database::TaskManagement;
-use crate::database::models::{ORDER_GAP, Priority, Recurrence, TaskStatus};
+use crate::database::models::{CodeLanguage, ORDER_GAP, Priority, Recurrence, TaskStatus};
 use crate::database::{ProjectEntry, Task};
 use crate::ui::app::EditFocus;
 use crate::ui::app::FastTask;
@@ -69,6 +69,7 @@ pub struct TaskWriter {
     pub status: TaskStatus,
     pub code: bool,
     pub recurrence: Option<Recurrence>,
+    pub language: Option<CodeLanguage>,
     pub has_focus: EditFocus,
     pub order: u64,
     pub initial_frame: bool,
@@ -95,6 +96,7 @@ impl Default for TaskWriter {
             wait_text: Default::default(),
             code: Default::default(),
             recurrence: None,
+            language: None,
             status: TaskStatus::NotStarted,
             duedate: None,
             priority: Priority::Normal,
@@ -117,6 +119,8 @@ impl TaskWriter {
         self.priority = Priority::Normal;
         self.status = TaskStatus::NotStarted;
         self.recurrence = None;
+        self.code = false;
+        self.language = None;
         self.has_focus = Default::default();
         self.initial_frame = true;
     }
@@ -128,6 +132,7 @@ impl From<Task> for TaskWriter {
             title_buffer: value.title,
             details_buffer: value.details,
             code: value.code,
+            language: value.language,
             recurrence: value.recurrence,
             status: value.status,
             tags_buffer: value.tags.unwrap_or_default().join(", "),
@@ -390,7 +395,7 @@ pub(crate) fn task_card(ui: &mut egui::Ui, task: &Task) {
         egui::ScrollArea::vertical()
             .id_salt("task_card_details")
             .show(ui, |ui| {
-                ui.label(egui::RichText::new(&task.details).size(13.0));
+                crate::ui::widgets::code::details_view(ui, &task.details, task.code, task.language);
             });
         ui.add_space(4.0);
     }
@@ -554,6 +559,7 @@ pub(crate) fn task_submit_edit(
             task.priority = writer.priority.clone();
             task.tags = parse_tags(&writer.tags_buffer);
             task.recurrence = writer.recurrence.clone();
+            task.language = writer.language;
             if let Some(done) = &mut just_completed {
                 // Base the next occurrence on the saved values, not the old ones.
                 *done = task.clone();
@@ -595,6 +601,7 @@ pub(crate) fn task_submit_create(
             status: writer.status,
             wait_until: writer.wait_until,
             recurrence: writer.recurrence,
+            language: writer.language,
             ..Default::default()
         };
         match backend.create_task(task) {
@@ -624,6 +631,7 @@ fn task_submit_paste(
             due: source.due,
             tags: source.tags,
             code: source.code,
+            language: source.language,
             wait_until: source.wait_until,
             project_id,
             order,
@@ -755,6 +763,7 @@ fn next_occurrence(task: &Task) -> Option<Task> {
         priority: task.priority.clone(),
         tags: task.tags.clone(),
         code: task.code,
+        language: task.language,
         project_id: task.project_id,
         recurrence: task.recurrence.clone(),
         wait_until: task.wait_until,
@@ -2555,6 +2564,12 @@ mod tests {
         }
 
         fn frame(&mut self, events: Vec<egui::Event>) {
+            self.frame_with(events, egui::Modifiers::NONE);
+        }
+
+        /// Like the real backend, held modifiers are set on the frame's input state
+        /// as well as on each key event.
+        fn frame_with(&mut self, events: Vec<egui::Event>, modifiers: egui::Modifiers) {
             use eframe::App;
             let mut frame = eframe::Frame::_new_kittest();
             let input = egui::RawInput {
@@ -2563,6 +2578,7 @@ mod tests {
                     egui::vec2(500.0, 900.0),
                 )),
                 events,
+                modifiers,
                 ..Default::default()
             };
             let app = &mut self.app;
@@ -2570,13 +2586,16 @@ mod tests {
         }
 
         fn key(&mut self, key: egui::Key, modifiers: egui::Modifiers) {
-            self.frame(vec![egui::Event::Key {
-                key,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
+            self.frame_with(
+                vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }],
                 modifiers,
-            }]);
+            );
             self.frame(vec![]);
         }
 
@@ -2786,5 +2805,54 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(next.len(), 1);
         assert_eq!(next[0].title, "renamed", "built from the saved values");
+    }
+
+    // --- syntax-highlighted details editor ---
+
+    fn code_editor_harness() -> Harness {
+        let mut h = Harness::editor(&[]);
+        h.app.task_manager.writer.code = true;
+        h.app.task_manager.writer.language = Some(CodeLanguage::Rust);
+        h.ctx
+            .memory_mut(|m| m.request_focus(egui::Id::new("details_input")));
+        h.frame(vec![]);
+        h
+    }
+
+    #[test]
+    fn code_editor_shift_enter_is_newline_not_save() {
+        let mut h = code_editor_harness();
+        h.type_text("fn main() {}");
+        h.key(egui::Key::Enter, egui::Modifiers::SHIFT);
+        assert!(matches!(
+            h.app.app_state.mode,
+            crate::ui::app::Mode::Insert(_)
+        ));
+        assert_eq!(h.app.task_manager.writer.details_buffer, "fn main() {}\n");
+    }
+
+    #[test]
+    fn code_editor_plain_enter_saves_without_inserting_newline() {
+        let mut h = code_editor_harness();
+        h.type_text("let x = 1;");
+        h.key(egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(
+            matches!(h.app.app_state.mode, crate::ui::app::Mode::Normal),
+            "Enter saved the form"
+        );
+    }
+
+    #[test]
+    fn flush_resets_code_format() {
+        let mut w = TaskWriter {
+            code: true,
+            language: Some(CodeLanguage::Lua),
+            ..Default::default()
+        };
+        w.flush();
+        assert!(
+            !w.code && w.language.is_none(),
+            "next new task starts as plain text"
+        );
     }
 }

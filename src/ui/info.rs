@@ -445,31 +445,15 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
                         "Free-form description (notes are a separate timestamped log)",
                     );
                     ui.add_space(8.0);
-                    let code = &mut app.task_manager.writer.code;
-                    ui.checkbox(
-                        code,
-                        egui::RichText::new("Monospace")
-                            .size(11.0)
-                            .color(colors::SUBTEXT0),
-                    )
-                    .on_hover_text("Render details as fixed-width text");
+                    format_picker(ui, &mut app.task_manager.writer);
                 });
-                if app.task_manager.writer.code {
-                    ui.code_editor(&mut app.task_manager.writer.details_buffer);
-                } else {
-                    // Shift+Enter inserts a newline; plain Enter is reserved for the
-                    // global submit handler below.
-                    ui.add(
-                        egui::TextEdit::multiline(&mut app.task_manager.writer.details_buffer)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(4)
-                            .hint_text("Additional context…")
-                            .return_key(egui::KeyboardShortcut::new(
-                                egui::Modifiers::SHIFT,
-                                egui::Key::Enter,
-                            )),
-                    );
-                }
+                let w = &mut app.task_manager.writer;
+                crate::ui::widgets::code::details_editor(
+                    ui,
+                    &mut w.details_buffer,
+                    w.code,
+                    w.language,
+                );
 
                 // Auto-focus title on first frame (must be inside scroll area to capture header)
                 if let EditFocus::None = app.task_manager.writer.has_focus {
@@ -948,4 +932,42 @@ fn tag_input(ui: &mut egui::Ui, app: &mut FastTask) {
         }
         resp.request_focus();
     }
+}
+
+/// "Format" dropdown for Details: plain text, monospace, or a highlighted language.
+fn format_picker(ui: &mut egui::Ui, w: &mut crate::ui::tasks::TaskWriter) {
+    use crate::database::models::CodeLanguage;
+    let current = match (w.code, w.language) {
+        (_, Some(lang)) => lang.label(),
+        (true, None) => "Monospace",
+        (false, None) => "Plain text",
+    };
+    egui::ComboBox::from_id_salt("details_format")
+        .selected_text(
+            egui::RichText::new(current)
+                .size(11.0)
+                .color(colors::SUBTEXT0),
+        )
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(!w.code, "Plain text").clicked() {
+                (w.code, w.language) = (false, None);
+            }
+            if ui
+                .selectable_label(w.code && w.language.is_none(), "Monospace")
+                .clicked()
+            {
+                (w.code, w.language) = (true, None);
+            }
+            ui.separator();
+            for lang in CodeLanguage::ALL {
+                if ui
+                    .selectable_label(w.language == Some(lang), lang.label())
+                    .clicked()
+                {
+                    (w.code, w.language) = (true, Some(lang));
+                }
+            }
+        })
+        .response
+        .on_hover_text("How Details is shown: plain, fixed-width, or syntax-highlighted code");
 }
