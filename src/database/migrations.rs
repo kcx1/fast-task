@@ -2,7 +2,7 @@ use anyhow::Context;
 use polodb_core::CollectionT;
 use polodb_core::bson::{Document, doc};
 
-pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 6;
+pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 7;
 
 const TASK_COLLECTION: &str = "tasks";
 const HISTORY_COLLECTION: &str = "history";
@@ -23,6 +23,7 @@ pub(crate) fn run(db: &polodb_core::Database) -> anyhow::Result<()> {
     // v4: adds wait_until (Option<DateTime>) — no-op, serde(default) handles missing field
     // v5: adds recurrence (Option<Recurrence>) — no-op, serde(default) handles missing field
     // v6: annotations collection — no-op, created on first insert
+    // v7: adds language (Option<CodeLanguage>) — no-op, serde(default) handles missing field
     if version < CURRENT_SCHEMA_VERSION {
         set_schema_version(db, CURRENT_SCHEMA_VERSION);
     }

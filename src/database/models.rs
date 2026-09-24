@@ -124,6 +124,9 @@ pub struct Task {
     pub order: u64,
     #[serde(default)]
     pub recurrence: Option<Recurrence>,
+    /// Syntax-highlight `details` as this language (implies `code`).
+    #[serde(default)]
+    pub language: Option<CodeLanguage>,
 }
 
 pub(crate) const ORDER_GAP: u64 = 1_000;
@@ -155,6 +158,72 @@ impl Default for Task {
             modify_date: DateTime::now(),
             order: 0,
             recurrence: None,
+            language: None,
+        }
+    }
+}
+
+/// Language used to syntax-highlight a task's details.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeLanguage {
+    Rust,
+    Python,
+    Lua,
+    JavaScript,
+    Css,
+    Shell,
+    Json,
+    Yaml,
+    Sql,
+    Markdown,
+    Html,
+}
+
+impl CodeLanguage {
+    pub const ALL: [CodeLanguage; 11] = [
+        Self::Rust,
+        Self::Python,
+        Self::Lua,
+        Self::JavaScript,
+        Self::Css,
+        Self::Shell,
+        Self::Json,
+        Self::Yaml,
+        Self::Sql,
+        Self::Markdown,
+        Self::Html,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rust => "Rust",
+            Self::Python => "Python",
+            Self::Lua => "Lua",
+            Self::JavaScript => "JavaScript",
+            Self::Css => "CSS",
+            Self::Shell => "Shell",
+            Self::Json => "JSON",
+            Self::Yaml => "YAML",
+            Self::Sql => "SQL",
+            Self::Markdown => "Markdown",
+            Self::Html => "HTML",
+        }
+    }
+
+    /// File extension syntect resolves to the right syntax definition.
+    pub fn syntax_key(self) -> &'static str {
+        match self {
+            Self::Rust => "rs",
+            Self::Python => "py",
+            Self::Lua => "lua",
+            Self::JavaScript => "js",
+            Self::Css => "css",
+            Self::Shell => "sh",
+            Self::Json => "json",
+            Self::Yaml => "yaml",
+            Self::Sql => "sql",
+            Self::Markdown => "md",
+            Self::Html => "html",
         }
     }
 }

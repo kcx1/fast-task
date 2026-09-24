@@ -7,7 +7,7 @@ use polodb_core::bson::DateTime;
 use polodb_core::bson::oid::ObjectId;
 
 use crate::database::TaskManagement;
-use crate::database::models::{ORDER_GAP, Priority, Recurrence, TaskStatus};
+use crate::database::models::{CodeLanguage, ORDER_GAP, Priority, Recurrence, TaskStatus};
 use crate::database::{ProjectEntry, Task};
 use crate::ui::app::EditFocus;
 use crate::ui::app::FastTask;
@@ -69,6 +69,7 @@ pub struct TaskWriter {
     pub status: TaskStatus,
     pub code: bool,
     pub recurrence: Option<Recurrence>,
+    pub language: Option<CodeLanguage>,
     pub has_focus: EditFocus,
     pub order: u64,
     pub initial_frame: bool,
@@ -95,6 +96,7 @@ impl Default for TaskWriter {
             wait_text: Default::default(),
             code: Default::default(),
             recurrence: None,
+            language: None,
             status: TaskStatus::NotStarted,
             duedate: None,
             priority: Priority::Normal,
@@ -117,6 +119,8 @@ impl TaskWriter {
         self.priority = Priority::Normal;
         self.status = TaskStatus::NotStarted;
         self.recurrence = None;
+        self.code = false;
+        self.language = None;
         self.has_focus = Default::default();
         self.initial_frame = true;
     }
@@ -128,6 +132,7 @@ impl From<Task> for TaskWriter {
             title_buffer: value.title,
             details_buffer: value.details,
             code: value.code,
+            language: value.language,
             recurrence: value.recurrence,
             status: value.status,
             tags_buffer: value.tags.unwrap_or_default().join(", "),
@@ -390,7 +395,7 @@ pub(crate) fn task_card(ui: &mut egui::Ui, task: &Task) {
         egui::ScrollArea::vertical()
             .id_salt("task_card_details")
             .show(ui, |ui| {
-                ui.label(egui::RichText::new(&task.details).size(13.0));
+                crate::ui::widgets::code::details_view(ui, &task.details, task.code, task.language);
             });
         ui.add_space(4.0);
     }
@@ -534,28 +539,44 @@ pub(crate) fn task_submit_edit(
     task_id: ObjectId,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    crate::ui::bg::spawn(move || match backend.one_task(task_id) {
-        Ok(Some(mut task)) => {
+    crate::ui::bg::spawn(move || {
+        // Only the editor's fields are written; anything else (e.g. `order`, if the
+        // task was reordered while the editor was open) is kept from the fresh read.
+        let mut just_completed: Option<Task> = None;
+        let result = backend.modify_task(task_id, &mut |task| {
+            if writer.status == TaskStatus::Completed
+                && task.status != TaskStatus::Completed
+                && writer.recurrence.is_some()
+            {
+                just_completed = Some(task.clone());
+            }
             task.title = writer.title_buffer.clone();
             task.details = writer.details_buffer.clone();
             task.code = writer.code;
-            task.status = writer.status;
+            task.status = writer.status.clone();
             task.due = writer.duedate;
             task.wait_until = writer.wait_until;
-            task.priority = writer.priority;
+            task.priority = writer.priority.clone();
             task.tags = parse_tags(&writer.tags_buffer);
-            task.recurrence = writer.recurrence;
-            let _ = match backend.update_task(task) {
-                Ok(result) => tx.send(UpdateMessage::DbTransaction(Box::new(result))),
-                Err(e) => tx.send(UpdateMessage::Error(e)),
-            };
-        }
-        Ok(None) => {
-            let _ = tx.send(UpdateMessage::Error(anyhow::anyhow!("Task not found")));
-        }
-        Err(e) => {
+            task.recurrence = writer.recurrence.clone();
+            task.language = writer.language;
+            if let Some(done) = &mut just_completed {
+                // Base the next occurrence on the saved values, not the old ones.
+                *done = task.clone();
+            }
+        });
+        // Save & Done (or picking Completed) on a recurring task schedules the next one.
+        if let Some(done) = just_completed
+            && let Some(next) = next_occurrence(&done)
+            && let Err(e) = backend.create_task(next)
+        {
             let _ = tx.send(UpdateMessage::Error(e));
         }
+        let _ = match result {
+            Ok(Some(id)) => tx.send(UpdateMessage::DbTransaction(Box::new(id))),
+            Ok(None) => tx.send(UpdateMessage::Error(anyhow::anyhow!("Task not found"))),
+            Err(e) => tx.send(UpdateMessage::Error(e)),
+        };
     });
 }
 
@@ -580,6 +601,7 @@ pub(crate) fn task_submit_create(
             status: writer.status,
             wait_until: writer.wait_until,
             recurrence: writer.recurrence,
+            language: writer.language,
             ..Default::default()
         };
         match backend.create_task(task) {
@@ -609,6 +631,7 @@ fn task_submit_paste(
             due: source.due,
             tags: source.tags,
             code: source.code,
+            language: source.language,
             wait_until: source.wait_until,
             project_id,
             order,
@@ -678,51 +701,9 @@ fn task_submit_set_status(
     status: TaskStatus,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    crate::ui::bg::spawn(move || match backend.one_task(task_id) {
-        Ok(Some(mut task)) => {
-            if status == TaskStatus::Completed
-                && let Some(recurrence) = &task.recurrence
-            {
-                let base = task
-                    .due
-                    .as_ref()
-                    .and_then(bson_dt_to_jiff_date)
-                    .unwrap_or_else(|| jiff::Zoned::now().date());
-                let span = match recurrence {
-                    Recurrence::Daily => jiff::Span::new().days(1i64),
-                    Recurrence::Weekly => jiff::Span::new().weeks(1i64),
-                    Recurrence::Monthly => jiff::Span::new().months(1i64),
-                    Recurrence::Yearly => jiff::Span::new().years(1i64),
-                };
-                if let Ok(next_date) = base.checked_add(span) {
-                    let next_task = Task {
-                        title: task.title.clone(),
-                        details: task.details.clone(),
-                        priority: task.priority.clone(),
-                        tags: task.tags.clone(),
-                        code: task.code,
-                        project_id: task.project_id,
-                        recurrence: task.recurrence.clone(),
-                        wait_until: task.wait_until,
-                        due: from_jiff_to_datetime(next_date),
-                        order: task.get_next_gap(),
-                        ..Default::default()
-                    };
-                    if let Err(e) = backend.create_task(next_task) {
-                        let _ = tx.send(UpdateMessage::Error(e));
-                        return;
-                    }
-                }
-            }
-            task.status = status;
-            match backend.update_task(task) {
-                Ok(result) => {
-                    tx.send(UpdateMessage::DbTransaction(Box::new(result))).ok();
-                }
-                Err(e) => {
-                    tx.send(UpdateMessage::Error(e)).ok();
-                }
-            }
+    crate::ui::bg::spawn(move || match apply_status(&backend, task_id, &status) {
+        Ok(Some(result)) => {
+            tx.send(UpdateMessage::DbTransaction(Box::new(result))).ok();
         }
         Ok(None) => {
             tx.send(UpdateMessage::Error(anyhow::anyhow!("Task not found")))
@@ -734,6 +715,64 @@ fn task_submit_set_status(
     });
 }
 
+/// Set one task's status as an atomic read-modify-write. Completing a recurring
+/// task (that wasn't already completed) also creates its next occurrence.
+/// Shared by the single and bulk paths so both handle recurrence.
+fn apply_status(
+    backend: &Backend,
+    task_id: ObjectId,
+    status: &TaskStatus,
+) -> anyhow::Result<Option<ObjectId>> {
+    let mut just_completed: Option<Task> = None;
+    let result = backend.modify_task(task_id, &mut |task| {
+        if *status == TaskStatus::Completed
+            && task.status != TaskStatus::Completed
+            && task.recurrence.is_some()
+        {
+            just_completed = Some(task.clone());
+        }
+        task.status = status.clone();
+    })?;
+    if let Some(task) = just_completed
+        && let Some(next) = next_occurrence(&task)
+    {
+        backend.create_task(next)?;
+    }
+    Ok(result)
+}
+
+/// The next instance of a recurring `task`, due one period after its due date
+/// (or today, if it has none).
+fn next_occurrence(task: &Task) -> Option<Task> {
+    let recurrence = task.recurrence.as_ref()?;
+    let base = task
+        .due
+        .as_ref()
+        .and_then(bson_dt_to_jiff_date)
+        .unwrap_or_else(|| jiff::Zoned::now().date());
+    let span = match recurrence {
+        Recurrence::Daily => jiff::Span::new().days(1i64),
+        Recurrence::Weekly => jiff::Span::new().weeks(1i64),
+        Recurrence::Monthly => jiff::Span::new().months(1i64),
+        Recurrence::Yearly => jiff::Span::new().years(1i64),
+    };
+    let next_date = base.checked_add(span).ok()?;
+    Some(Task {
+        title: task.title.clone(),
+        details: task.details.clone(),
+        priority: task.priority.clone(),
+        tags: task.tags.clone(),
+        code: task.code,
+        language: task.language,
+        project_id: task.project_id,
+        recurrence: task.recurrence.clone(),
+        wait_until: task.wait_until,
+        due: from_jiff_to_datetime(next_date),
+        order: task.get_next_gap(),
+        ..Default::default()
+    })
+}
+
 fn task_submit_set_status_many(
     backend: Backend,
     ids: Vec<ObjectId>,
@@ -742,19 +781,9 @@ fn task_submit_set_status_many(
 ) {
     crate::ui::bg::spawn(move || {
         for id in ids {
-            match backend.one_task(id) {
-                Ok(Some(mut task)) => {
-                    task.status = status.clone();
-                    if let Err(e) = backend.update_task(task) {
-                        let _ = tx.send(UpdateMessage::Error(e));
-                        return;
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    let _ = tx.send(UpdateMessage::Error(e));
-                    return;
-                }
+            if let Err(e) = apply_status(&backend, id, &status) {
+                let _ = tx.send(UpdateMessage::Error(e));
+                return;
             }
         }
         let _ = tx.send(UpdateMessage::Refresh);
@@ -1200,9 +1229,13 @@ fn shift_priority(app: &mut FastTask, visible: &[usize], up: bool) {
     }
     let backend = app.backend_manager.backend.clone();
     let tx = app.backend_manager.tx.clone();
+    // Write only the priority onto a fresh read, so a stale list copy can't
+    // revert other fields saved since the list was loaded.
+    let updates: Vec<(ObjectId, Priority)> =
+        changed.into_iter().map(|t| (t.id, t.priority)).collect();
     crate::ui::bg::spawn(move || {
-        for task in changed {
-            match backend.update_task(task) {
+        for (id, priority) in updates {
+            match backend.modify_task(id, &mut |t| t.priority = priority.clone()) {
                 Ok(r) => {
                     tx.send(UpdateMessage::DbTransaction(Box::new(r))).ok();
                 }
@@ -1491,13 +1524,16 @@ fn swap_tasks(app: &mut FastTask, backend: Backend, a: usize, b: usize) {
         let b_o = app.task_manager.tasks[b].order;
         app.task_manager.tasks[a].order = b_o;
         app.task_manager.tasks[b].order = a_o;
-        let ta = app.task_manager.tasks[a].clone();
-        let tb = app.task_manager.tasks[b].clone();
+        // Only `order` changes; written onto a fresh read of each task.
+        let updates = [
+            (app.task_manager.tasks[a].id, b_o),
+            (app.task_manager.tasks[b].id, a_o),
+        ];
         app.task_manager.tasks.swap(a, b);
         let tx = app.backend_manager.tx.clone();
         crate::ui::bg::spawn(move || {
-            for task in [ta, tb] {
-                match backend.update_task(task) {
+            for (id, order) in updates {
+                match backend.modify_task(id, &mut |t| t.order = order) {
                     Ok(r) => {
                         tx.send(UpdateMessage::DbTransaction(Box::new(r))).ok();
                     }
@@ -2528,6 +2564,12 @@ mod tests {
         }
 
         fn frame(&mut self, events: Vec<egui::Event>) {
+            self.frame_with(events, egui::Modifiers::NONE);
+        }
+
+        /// Like the real backend, held modifiers are set on the frame's input state
+        /// as well as on each key event.
+        fn frame_with(&mut self, events: Vec<egui::Event>, modifiers: egui::Modifiers) {
             use eframe::App;
             let mut frame = eframe::Frame::_new_kittest();
             let input = egui::RawInput {
@@ -2536,6 +2578,7 @@ mod tests {
                     egui::vec2(500.0, 900.0),
                 )),
                 events,
+                modifiers,
                 ..Default::default()
             };
             let app = &mut self.app;
@@ -2543,13 +2586,16 @@ mod tests {
         }
 
         fn key(&mut self, key: egui::Key, modifiers: egui::Modifiers) {
-            self.frame(vec![egui::Event::Key {
-                key,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
+            self.frame_with(
+                vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }],
                 modifiers,
-            }]);
+            );
             self.frame(vec![]);
         }
 
@@ -2681,5 +2727,132 @@ mod tests {
         assert_eq!(app.tag_ui.mode, TagUiMode::ConfirmDelete("work".into()));
         press(&mut app, egui::Key::N, egui::Modifiers::NONE);
         assert_eq!(app.tag_ui.mode, TagUiMode::Browse);
+    }
+
+    #[test]
+    fn editing_a_task_loads_its_notes() {
+        let (mut app, _dir) = build_test_app(false);
+        let id = app.task_manager.tasks[2].id;
+        app.app_state.mode = crate::ui::app::Mode::Insert(Some(id));
+        app.app_state.window_state = crate::ui::app::WindowState::Info;
+        press(&mut app, egui::Key::F1, egui::Modifiers::NONE);
+        assert_eq!(
+            app.annotation_task_id,
+            Some(id),
+            "editor fetched this task's notes"
+        );
+    }
+
+    #[test]
+    fn completing_recurring_task_creates_one_next_occurrence_even_when_repeated() {
+        use crate::database::database::Db;
+        let dir = tempfile::TempDir::new().unwrap();
+        let backend: Backend = std::sync::Arc::new(Db::open_path(dir.path().join("t.db")).unwrap());
+        let id = backend
+            .create_task(Task {
+                title: "water plants".into(),
+                order: 1000,
+                recurrence: Some(Recurrence::Weekly),
+                ..Default::default()
+            })
+            .unwrap();
+        // Bulk path and single path share apply_status; completing twice must
+        // not spawn a second occurrence.
+        apply_status(&backend, id, &TaskStatus::Completed).unwrap();
+        apply_status(&backend, id, &TaskStatus::Completed).unwrap();
+        let all = backend
+            .get_tasks(crate::database::ProjectEntry::All)
+            .unwrap();
+        let open: Vec<_> = all
+            .iter()
+            .filter(|t| t.status != TaskStatus::Completed)
+            .collect();
+        assert_eq!(all.len(), 2);
+        assert_eq!(open.len(), 1);
+        assert!(open[0].due.is_some(), "next occurrence is scheduled");
+    }
+
+    #[test]
+    fn save_and_done_on_recurring_task_schedules_next() {
+        use crate::database::database::Db;
+        let dir = tempfile::TempDir::new().unwrap();
+        let backend: Backend = std::sync::Arc::new(Db::open_path(dir.path().join("t.db")).unwrap());
+        let id = backend
+            .create_task(Task {
+                title: "old".into(),
+                order: 1000,
+                recurrence: Some(Recurrence::Daily),
+                ..Default::default()
+            })
+            .unwrap();
+        let writer = TaskWriter {
+            title_buffer: "renamed".into(),
+            status: TaskStatus::Completed,
+            recurrence: Some(Recurrence::Daily),
+            ..Default::default()
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        task_submit_edit(backend.clone(), writer, id, tx);
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+
+        let all = backend
+            .get_tasks(crate::database::ProjectEntry::All)
+            .unwrap();
+        let next: Vec<_> = all
+            .iter()
+            .filter(|t| t.status != TaskStatus::Completed)
+            .collect();
+        assert_eq!(all.len(), 2);
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].title, "renamed", "built from the saved values");
+    }
+
+    // --- syntax-highlighted details editor ---
+
+    fn code_editor_harness() -> Harness {
+        let mut h = Harness::editor(&[]);
+        h.app.task_manager.writer.code = true;
+        h.app.task_manager.writer.language = Some(CodeLanguage::Rust);
+        h.ctx
+            .memory_mut(|m| m.request_focus(egui::Id::new("details_input")));
+        h.frame(vec![]);
+        h
+    }
+
+    #[test]
+    fn code_editor_shift_enter_is_newline_not_save() {
+        let mut h = code_editor_harness();
+        h.type_text("fn main() {}");
+        h.key(egui::Key::Enter, egui::Modifiers::SHIFT);
+        assert!(matches!(
+            h.app.app_state.mode,
+            crate::ui::app::Mode::Insert(_)
+        ));
+        assert_eq!(h.app.task_manager.writer.details_buffer, "fn main() {}\n");
+    }
+
+    #[test]
+    fn code_editor_plain_enter_saves_without_inserting_newline() {
+        let mut h = code_editor_harness();
+        h.type_text("let x = 1;");
+        h.key(egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(
+            matches!(h.app.app_state.mode, crate::ui::app::Mode::Normal),
+            "Enter saved the form"
+        );
+    }
+
+    #[test]
+    fn flush_resets_code_format() {
+        let mut w = TaskWriter {
+            code: true,
+            language: Some(CodeLanguage::Lua),
+            ..Default::default()
+        };
+        w.flush();
+        assert!(
+            !w.code && w.language.is_none(),
+            "next new task starts as plain text"
+        );
     }
 }

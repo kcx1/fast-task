@@ -103,7 +103,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
+
+      # Before clippy: no build needed, fails in seconds.
+      - name: Format
+        run: cargo fmt --all --check
 
       - uses: Swatinem/rust-cache@v2
         with:
