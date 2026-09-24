@@ -51,18 +51,20 @@ jobs:
         if: steps.commit-changelog.outputs.changes_detected == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          BRANCH: chore/changelog-${{ github.ref_name }}
         run: |
-          gh pr create \
-            --repo "${{ github.repository }}" \
-            --base main \
-            --head "chore/changelog-${{ github.ref_name }}" \
-            --title "docs: update CHANGELOG.md for ${{ github.ref_name }}" \
-            --body "Automated changelog update for ${{ github.ref_name }}."
+          gh pr view "$BRANCH" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh pr create \
+              --repo "${{ github.repository }}" \
+              --base main \
+              --head "$BRANCH" \
+              --title "docs: update CHANGELOG.md for ${{ github.ref_name }}" \
+              --body "Automated changelog update for ${{ github.ref_name }}."
+          gh pr merge "$BRANCH" --repo "${{ github.repository }}" --squash --delete-branch
 
-          gh pr merge \
-            --repo "${{ github.repository }}" \
-            "chore/changelog-${{ github.ref_name }}" \
-            --squash --delete-branch
+      - name: Clean up changelog branch on failure
+        if: failure() && steps.commit-changelog.outputs.changes_detected == 'true'
+        run: git push origin --delete "chore/changelog-${{ github.ref_name }}" || true
 
   upload-assets:
     needs: create-release
@@ -80,7 +82,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux system dependenc
+      - name: Install Linux system dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
@@ -91,7 +93,6 @@ jobs:
             libxcb-xfixes0-dev \
             libxkbcommon-dev \
             libssl-dev
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
