@@ -6,8 +6,16 @@ on:
   pull_request:
     branches: ["main"]
 
+# A new push to the same PR cancels the run it supersedes; pushes to main
+# always run to completion so they reliably save the cache PRs restore from.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
+  # No debuginfo in CI: smaller artifacts, faster linking, smaller cache.
+  CARGO_PROFILE_DEV_DEBUG: "0"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -36,6 +44,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test
+          # Save even when the job fails, so a red run still warms the next one.
+          cache-on-failure: true
 
       - name: Run tests
         env:
@@ -98,6 +108,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: lint
+          # Save even when the job fails, so a red run still warms the next one.
+          cache-on-failure: true
 
       - name: Lint
         run: cargo clippy --all-features --all-targets -- -D warnings
