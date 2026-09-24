@@ -152,6 +152,7 @@ pub fn info_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
                     app.annotation_task_id = Some(task.id);
                     app.annotations.clear();
                     app.annotation_buf.clear();
+                    app.annotation_cursor = None;
                     let task_id = task.id;
                     let tx = app.backend_manager.tx.clone();
                     crate::ui::bg::spawn(move || match DB.get_annotations(task_id) {
@@ -194,8 +195,51 @@ pub fn info_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
 
                         common::field_label(ui, "Notes");
 
+                        // Info-pane keys (only when no text field has focus):
+                        // e / i edit, a add note, j / k / ↓ / ↑ highlight a note, x delete it.
+                        let keys_free = !ui.ctx().egui_wants_keyboard_input();
+                        let (key_edit, key_add, key_down, key_up, key_del) = if keys_free {
+                            ui.input(|i| {
+                                (
+                                    i.key_pressed(egui::Key::E) || i.key_pressed(egui::Key::I),
+                                    i.key_pressed(egui::Key::A) && !i.modifiers.shift,
+                                    i.key_pressed(egui::Key::J)
+                                        || i.key_pressed(egui::Key::ArrowDown),
+                                    i.key_pressed(egui::Key::K)
+                                        || i.key_pressed(egui::Key::ArrowUp),
+                                    i.key_pressed(egui::Key::X),
+                                )
+                            })
+                        } else {
+                            (false, false, false, false, false)
+                        };
+                        if key_edit {
+                            app.app_state.mode = Mode::Insert(Some(task.id));
+                            app.app_state.window_state = WindowState::Info;
+                        }
+                        let n_notes = app.annotations.len();
+                        if key_down && n_notes > 0 {
+                            app.annotation_cursor = Some(
+                                app.annotation_cursor
+                                    .map_or(0, |c| (c + 1).min(n_notes - 1)),
+                            );
+                        }
+                        if key_up && n_notes > 0 {
+                            app.annotation_cursor =
+                                Some(app.annotation_cursor.map_or(0, |c| c.saturating_sub(1)));
+                        }
+                        if app.annotation_cursor.is_some_and(|c| c >= n_notes) {
+                            app.annotation_cursor = n_notes.checked_sub(1);
+                        }
+
                         // Scrollable annotation list
-                        let mut to_delete: Option<ObjectId> = None;
+                        let mut to_delete: Option<ObjectId> = if key_del {
+                            app.annotation_cursor
+                                .and_then(|c| app.annotations.get(c))
+                                .map(|a| a.id)
+                        } else {
+                            None
+                        };
                         egui::ScrollArea::vertical()
                             .id_salt("annotations_scroll")
                             .max_height(180.0)
@@ -208,20 +252,26 @@ pub fn info_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
                                             .italics(),
                                     );
                                 }
-                                for ann in &app.annotations {
+                                for (idx, ann) in app.annotations.iter().enumerate() {
+                                    let highlighted = app.annotation_cursor == Some(idx);
                                     ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(format_annotation_ts(
-                                                &ann.created_at,
-                                            ))
-                                            .color(colors::SUBTEXT0)
-                                            .size(11.0),
+                                        let ts = format_annotation_ts(&ann.created_at);
+                                        let (ts, ts_color) = if highlighted {
+                                            (format!("▸ {ts}"), colors::BLUE)
+                                        } else {
+                                            (ts, colors::SUBTEXT0)
+                                        };
+                                        let ts_resp = ui.label(
+                                            egui::RichText::new(ts).color(ts_color).size(11.0),
                                         );
+                                        if highlighted && (key_down || key_up) {
+                                            ts_resp.scroll_to_me(None);
+                                        }
                                         if common::secondary_button(
                                             ui,
                                             crate::ui::theme::icons::DISCARD,
                                         )
-                                        .on_hover_text("Delete note")
+                                        .on_hover_text("Delete note (x)")
                                         .clicked()
                                         {
                                             to_delete = Some(ann.id);
@@ -256,8 +306,13 @@ pub fn info_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut app.annotation_buf)
                                 .desired_width(f32::INFINITY)
-                                .hint_text("Add a note… (Enter to save)"),
+                                .hint_text("Add a note… (a, Enter to save)"),
                         );
+                        // Focus is requested after the input is laid out, so the `a`
+                        // keystroke itself isn't typed into the field this frame.
+                        if key_add {
+                            resp.request_focus();
+                        }
                         // Esc surrenders focus without saving
                         if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                             ui.ctx().memory_mut(|m| m.surrender_focus(resp.id));
@@ -351,7 +406,7 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
                             ui,
                             format!("{}  Save & Done", icons::STATUS_COMPLETED),
                         )
-                        .on_hover_text("Save and mark as completed")
+                        .on_hover_text("Save and mark as completed (Ctrl/Cmd+Enter)")
                         .clicked()
                         {
                             app.task_manager.writer.status = TaskStatus::Completed;
@@ -723,14 +778,28 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
             }); // end ScrollArea
         }); // end Frame
 
-    let (enter, shift_held) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.modifiers.shift));
+    let (enter, shift_held, cmd_held) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::Enter),
+            i.modifiers.shift,
+            i.modifiers.ctrl || i.modifiers.command,
+        )
+    });
     let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
     // When a ComboBox or DatePicker popup is open, Enter selects the highlighted option and
     // Esc closes the popup — in both cases the key must operate the control, not the form.
     // (Esc with no focus would also make us discard the whole form.) Let egui handle it.
     let popup_open = egui::Popup::is_any_open(ui.ctx());
-    // Shift+Enter is handled by the Details TextEdit's return_key; plain Enter saves.
-    if enter && !shift_held && !popup_open {
+    // A focused button / checkbox (reached with Tab) is activated by egui on Enter or
+    // Space; don't also submit the form. Text fields and "nothing focused" still save.
+    let focused = ui.ctx().memory(|m| m.focused());
+    let control_focused = focused.is_some() && !ui.ctx().egui_wants_keyboard_input();
+    // Shift+Enter is handled by the Details TextEdit's return_key; plain Enter saves;
+    // Ctrl/Cmd+Enter is Save & Done.
+    if enter && !shift_held && !popup_open && !control_focused {
+        if cmd_held {
+            app.task_manager.writer.status = TaskStatus::Completed;
+        }
         submit(app);
     }
     if esc && !popup_open {

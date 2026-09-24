@@ -150,7 +150,10 @@ pub struct TaskManager {
     pub current: Option<usize>,
     pub writer: TaskWriter,
     pub selected_tasks: std::collections::HashSet<ObjectId>,
-    pub clipboard_task: Option<Task>,
+    /// Yanked tasks, in list order; `p` / `Shift+P` paste all of them.
+    pub clipboard: Vec<Task>,
+    /// First `g` of a `gg` (jump to top) was pressed; cleared by any other key.
+    pub pending_g: bool,
     pub filter_query: String,
     pub filter_open: bool,
     pub filter_just_opened: bool,
@@ -1019,13 +1022,210 @@ pub(crate) fn order_above(tasks: &[Task], idx: usize) -> u64 {
     }
 }
 
+/// Half a page for Ctrl+D / Ctrl+U.
+const HALF_PAGE: usize = 10;
+
+/// Cursor movement shared by Normal and Visual mode: j/k and ↓/↑ step, `gg` / `G`
+/// jump to top / bottom, Ctrl+D / Ctrl+U move half a page. `shift_jk` lets plain
+/// j/k also fire with Shift held (Normal); Visual reserves Shift+J/K for reordering.
+fn move_cursor(i: &egui::InputState, app: &mut FastTask, vis_len: usize, shift_jk: bool) {
+    let shift = i.modifiers.shift;
+    let ctrl = i.modifiers.ctrl;
+    let last = vis_len.saturating_sub(1);
+    let cur = app.task_manager.current;
+    let step = |delta: isize| -> Option<usize> {
+        Some(match cur {
+            Some(c) => c.saturating_add_signed(delta).min(last),
+            None => 0,
+        })
+    };
+
+    let jk_ok = shift_jk || !shift;
+    if (i.key_pressed(Key::J) && jk_ok) || i.key_pressed(Key::ArrowDown) {
+        app.task_manager.current = step(1);
+    }
+    if (i.key_pressed(Key::K) && jk_ok && !shift) || i.key_pressed(Key::ArrowUp) {
+        app.task_manager.current = step(-1);
+    }
+    if ctrl && i.key_pressed(Key::D) {
+        app.task_manager.current = step(HALF_PAGE as isize);
+    }
+    if ctrl && i.key_pressed(Key::U) {
+        app.task_manager.current = step(-(HALF_PAGE as isize));
+    }
+
+    // gg / G. Any other key press cancels a pending first `g`.
+    if i.key_pressed(Key::G) {
+        if shift {
+            app.task_manager.current = (vis_len > 0).then_some(last);
+            app.task_manager.pending_g = false;
+        } else if app.task_manager.pending_g {
+            app.task_manager.current = (vis_len > 0).then_some(0);
+            app.task_manager.pending_g = false;
+        } else {
+            app.task_manager.pending_g = true;
+        }
+    } else if i
+        .events
+        .iter()
+        .any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))
+    {
+        app.task_manager.pending_g = false;
+    }
+}
+
+/// Tasks the next bulk action applies to: the Tab-selection in list order, or
+/// just the task under the cursor when nothing is selected.
+fn action_targets(app: &FastTask, visible: &[usize]) -> Vec<Task> {
+    let tm = &app.task_manager;
+    if tm.selected_tasks.is_empty() {
+        tm.current
+            .and_then(|i| visible.get(i).copied())
+            .and_then(|ri| tm.tasks.get(ri))
+            .cloned()
+            .into_iter()
+            .collect()
+    } else {
+        visible
+            .iter()
+            .filter_map(|&ri| tm.tasks.get(ri))
+            .filter(|t| tm.selected_tasks.contains(&t.id))
+            .cloned()
+            .collect()
+    }
+}
+
+fn set_status_msg(app: &mut FastTask, msg: String) {
+    app.app_state.status_msg = Some((msg, std::time::Instant::now()));
+}
+
+/// `y`: copy the Tab-selection (or the current task) into the clipboard.
+fn yank(app: &mut FastTask, visible: &[usize]) {
+    let tasks = action_targets(app, visible);
+    let msg = match tasks.as_slice() {
+        [] => return,
+        [one] => format!("Yanked \"{}\"", one.title),
+        many => format!("Yanked {} tasks", many.len()),
+    };
+    app.task_manager.clipboard = tasks;
+    app.task_manager.selected_tasks.clear();
+    set_status_msg(app, msg);
+}
+
+/// `p` / `Shift+P`: paste every clipboard task below / above the cursor, in order.
+fn paste(app: &mut FastTask, visible: &[usize], above: bool) {
+    if app.task_manager.clipboard.is_empty() {
+        set_status_msg(app, "Nothing yanked — press y on a task first".into());
+        return;
+    }
+    let tasks = &app.task_manager.tasks;
+    let real_idx = app
+        .task_manager
+        .current
+        .and_then(|i| visible.get(i).copied())
+        .filter(|&ri| ri < tasks.len());
+    let orders = paste_orders(tasks, real_idx, above, app.task_manager.clipboard.len());
+    for (source, order) in app.task_manager.clipboard.clone().into_iter().zip(orders) {
+        task_submit_paste(
+            app.backend_manager.backend.clone(),
+            source,
+            app.project_manager.current().get_id(),
+            order,
+            app.backend_manager.tx.clone(),
+        );
+    }
+}
+
+/// `n` evenly spaced order values placed below / above `tasks[idx]`. Falls back to
+/// appending at the end when there's no cursor or no room between neighbours.
+pub(crate) fn paste_orders(tasks: &[Task], idx: Option<usize>, above: bool, n: usize) -> Vec<u64> {
+    let append = || {
+        let base = tasks.iter().map(|t| t.order).max().unwrap_or(0);
+        (1..=n as u64).map(|k| base + k * ORDER_GAP).collect()
+    };
+    let Some(idx) = idx else {
+        return append();
+    };
+    let here = tasks[idx].order;
+    let (lo, hi) = if above {
+        let prev = idx.checked_sub(1).map(|p| tasks[p].order).unwrap_or(0);
+        (prev, here)
+    } else {
+        let next = tasks
+            .get(idx + 1)
+            .map(|t| t.order)
+            .unwrap_or(here + ORDER_GAP * (n as u64 + 1));
+        (here, next)
+    };
+    let step = hi.saturating_sub(lo) / (n as u64 + 1);
+    if step == 0 {
+        return append();
+    }
+    (1..=n as u64).map(|k| lo + k * step).collect()
+}
+
+/// `+` / `-`: raise / lower priority on the Tab-selection (or the current task).
+fn shift_priority(app: &mut FastTask, visible: &[usize], up: bool) {
+    let targets = action_targets(app, visible);
+    let mut changed = Vec::new();
+    for mut task in targets {
+        let next = match (&task.priority, up) {
+            (Priority::Low, true) => Priority::Normal,
+            (Priority::Normal, true) => Priority::Urgent,
+            (Priority::Urgent, false) => Priority::Normal,
+            (Priority::Normal, false) => Priority::Low,
+            _ => continue, // already at the top / bottom
+        };
+        task.priority = next;
+        changed.push(task);
+    }
+    let msg = match changed.as_slice() {
+        [] => return,
+        [one] => format!("Priority: {}", one.priority),
+        many => format!(
+            "Priority {} on {} tasks",
+            if up { "raised" } else { "lowered" },
+            many.len()
+        ),
+    };
+    // Optimistic local update so the list reflects it before the refresh lands.
+    for t in &changed {
+        if let Some(local) = app.task_manager.tasks.iter_mut().find(|x| x.id == t.id) {
+            local.priority = t.priority.clone();
+        }
+    }
+    let backend = app.backend_manager.backend.clone();
+    let tx = app.backend_manager.tx.clone();
+    crate::ui::bg::spawn(move || {
+        for task in changed {
+            match backend.update_task(task) {
+                Ok(r) => {
+                    tx.send(UpdateMessage::DbTransaction(Box::new(r))).ok();
+                }
+                Err(e) => {
+                    tx.send(UpdateMessage::Error(e)).ok();
+                    return;
+                }
+            }
+        }
+    });
+    set_status_msg(app, msg);
+}
+
 fn normal_mode_keybinds(ui: &egui::Ui, app: &mut FastTask, visible: &[usize], vis_len: usize) {
     ui.input(|i| {
         let shift = i.modifiers.shift;
 
-        // Escape clears Tab-selection if any (mode is already Normal)
-        if i.key_pressed(Key::Escape) && !app.task_manager.selected_tasks.is_empty() {
-            app.task_manager.selected_tasks.clear();
+        // Esc peels back one layer per press: Tab-selection, then the confirmed
+        // filter, then — with nothing left to clear — back to the Projects pane.
+        if i.key_pressed(Key::Escape) {
+            if !app.task_manager.selected_tasks.is_empty() {
+                app.task_manager.selected_tasks.clear();
+            } else if !app.task_manager.filter_query.is_empty() {
+                app.task_manager.filter_query.clear();
+            } else {
+                app.app_state.window_state = WindowState::Projects;
+            }
         }
 
         // v = Visual mode (single-cursor reorder)
@@ -1109,56 +1309,40 @@ fn normal_mode_keybinds(ui: &egui::Ui, app: &mut FastTask, visible: &[usize], vi
             app.app_state.window_state = WindowState::Info;
         }
 
-        // y = yank (copy) current task into clipboard
-        if i.key_pressed(Key::Y)
-            && let Some(task) = app
-                .task_manager
-                .current
-                .and_then(|i| visible.get(i).copied())
-                .and_then(|ri| app.task_manager.tasks.get(ri))
-                .cloned()
-        {
-            app.task_manager.clipboard_task = Some(task);
+        // y = yank the Tab-selection (or the current task); p / Shift+P = paste below / above
+        if i.key_pressed(Key::Y) {
+            yank(app, visible);
         }
-
-        // p = paste clipboard below cursor, or navigate to Projects if clipboard is empty
         if i.key_pressed(Key::P) {
-            if let Some(source) = app.task_manager.clipboard_task.clone() {
-                let order = if let Some(vis_idx) = app.task_manager.current {
-                    let real_idx = visible.get(vis_idx).copied().unwrap_or(0);
-                    order_below(&app.task_manager.tasks, real_idx)
-                } else {
-                    app.task_manager
-                        .tasks
-                        .last()
-                        .map(|t| t.order + ORDER_GAP)
-                        .unwrap_or(ORDER_GAP)
-                };
-                task_submit_paste(
-                    app.backend_manager.backend.clone(),
-                    source,
-                    app.project_manager.current().get_id(),
-                    order,
-                    app.backend_manager.tx.clone(),
-                );
-            } else {
-                app.app_state.window_state = WindowState::Projects;
-            }
+            paste(app, visible, shift);
         }
 
-        if i.key_pressed(Key::J) {
-            app.task_manager.current = Some(match app.task_manager.current {
-                Some(i) => (i + 1).min(vis_len.saturating_sub(1)),
-                None => 0,
-            });
+        // Enter = open the current task in the Info pane (read-only view)
+        if i.key_pressed(Key::Enter) && app.task_manager.current.is_some() && vis_len > 0 {
+            app.app_state.window_state = WindowState::Info;
         }
 
-        if i.key_pressed(Key::K) && !shift {
-            app.task_manager.current = Some(match app.task_manager.current {
-                Some(i) => i.saturating_sub(1),
-                None => 0,
-            });
+        // + / - = raise / lower priority of the Tab-selection (or the current task)
+        if i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals) {
+            shift_priority(app, visible, true);
         }
+        if i.key_pressed(Key::Minus) {
+            shift_priority(app, visible, false);
+        }
+
+        // [ / ] = previous / next project without leaving the Tasks pane
+        let proj_count = app.project_manager.projects.len();
+        let proj_cur = app.project_manager.current_project;
+        if i.key_pressed(Key::OpenBracket) && proj_cur > 0 {
+            app.select_project(proj_cur - 1);
+            app.task_manager.current = Some(0);
+        }
+        if i.key_pressed(Key::CloseBracket) && proj_cur + 1 < proj_count {
+            app.select_project(proj_cur + 1);
+            app.task_manager.current = Some(0);
+        }
+
+        move_cursor(i, app, vis_len, true);
 
         let current_task = app
             .task_manager
@@ -1168,8 +1352,9 @@ fn normal_mode_keybinds(ui: &egui::Ui, app: &mut FastTask, visible: &[usize], vi
             .cloned();
         if let Some(current_task) = current_task {
             // d = mark complete, Shift+D = hard delete
-            // If there's a Tab-selection set, operate on all; otherwise on current task
-            if i.key_pressed(Key::D) {
+            // If there's a Tab-selection set, operate on all; otherwise on current task.
+            // Ctrl+D is half-page down, not complete.
+            if i.key_pressed(Key::D) && !i.modifiers.ctrl {
                 let backend = app.backend_manager.backend.clone();
                 let tx = app.backend_manager.tx.clone();
                 if !app.task_manager.selected_tasks.is_empty() {
@@ -1242,17 +1427,14 @@ fn visual_mode_keybinds(ui: &egui::Ui, app: &mut FastTask, visible: &[usize], vi
 
         let shift = i.modifiers.shift;
 
-        if i.key_pressed(Key::J) && !shift {
-            app.task_manager.current = Some(match app.task_manager.current {
-                Some(i) => (i + 1).min(vis_len.saturating_sub(1)),
-                None => 0,
-            });
+        move_cursor(i, app, vis_len, false);
+
+        // y / p / Shift+P work in Visual mode too
+        if i.key_pressed(Key::Y) {
+            yank(app, visible);
         }
-        if i.key_pressed(Key::K) && !shift {
-            app.task_manager.current = Some(match app.task_manager.current {
-                Some(i) => i.saturating_sub(1),
-                None => 0,
-            });
+        if i.key_pressed(Key::P) {
+            paste(app, visible, shift);
         }
 
         // Shift+J / Shift+K: move cursor task down / up (only in Free sort, no active filter)
@@ -1276,7 +1458,7 @@ fn visual_mode_keybinds(ui: &egui::Ui, app: &mut FastTask, visible: &[usize], vi
             .and_then(|ri| app.task_manager.tasks.get(ri))
             .cloned();
         if let Some(current_task) = current_task {
-            if i.key_pressed(Key::D) {
+            if i.key_pressed(Key::D) && !i.modifiers.ctrl {
                 let backend = app.backend_manager.backend.clone();
                 let tx = app.backend_manager.tx.clone();
                 if shift {
@@ -1853,6 +2035,7 @@ mod tests {
             annotations: Vec::new(),
             annotation_task_id: None,
             annotation_buf: String::new(),
+            annotation_cursor: None,
         };
         app.task_manager.tasks = tasks;
         app.task_manager.visible_cache = vec![0, 1, 2, 3];
@@ -2042,5 +2225,274 @@ mod tests {
             !clashes.is_empty(),
             "detector FAILED to catch a deliberate clash — other tests are unreliable"
         );
+    }
+
+    // --- pane navigation / Esc chain (full App::ui frame, real key events) ---
+
+    /// Run one full app frame with `key` pressed (plus `modifiers`).
+    fn press(app: &mut crate::ui::app::FastTask, key: egui::Key, modifiers: egui::Modifiers) {
+        use eframe::App;
+        let ctx = egui::Context::default();
+        let mut frame = eframe::Frame::_new_kittest();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(400.0, 300.0),
+            )),
+            modifiers,
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+    }
+
+    fn window(app: &crate::ui::app::FastTask) -> &'static str {
+        use crate::ui::app::WindowState;
+        match app.app_state.window_state {
+            WindowState::Projects => "projects",
+            WindowState::Tasks => "tasks",
+            WindowState::Info => "info",
+        }
+    }
+
+    #[test]
+    fn esc_from_projects_lands_on_tasks_without_bouncing() {
+        let (mut app, _dir) = build_test_app(false);
+        app.app_state.window_state = crate::ui::app::WindowState::Projects;
+        press(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(window(&app), "tasks");
+    }
+
+    #[test]
+    fn esc_in_tasks_peels_selection_then_filter_then_goes_to_projects() {
+        let (mut app, _dir) = build_test_app(false);
+        let id = app.task_manager.tasks[0].id;
+        app.task_manager.selected_tasks.insert(id);
+        app.task_manager.filter_query = "task".into();
+
+        press(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(app.task_manager.selected_tasks.is_empty());
+        assert_eq!(app.task_manager.filter_query, "task");
+        assert_eq!(window(&app), "tasks");
+
+        press(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(app.task_manager.filter_query.is_empty());
+        assert_eq!(window(&app), "tasks");
+
+        press(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(window(&app), "projects");
+    }
+
+    #[test]
+    fn esc_leaving_visual_mode_stays_in_tasks() {
+        let (mut app, _dir) = build_test_app(false);
+        app.app_state.mode = crate::ui::app::Mode::Visual;
+        press(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(matches!(app.app_state.mode, crate::ui::app::Mode::Normal));
+        assert_eq!(window(&app), "tasks");
+    }
+
+    #[test]
+    fn shift_h_l_step_through_panes_without_wrapping() {
+        let (mut app, _dir) = build_test_app(false);
+        let (h, l, shift) = (egui::Key::H, egui::Key::L, egui::Modifiers::SHIFT);
+
+        press(&mut app, l, shift);
+        assert_eq!(window(&app), "info");
+        press(&mut app, l, shift);
+        assert_eq!(window(&app), "info", "no wrap past Info");
+
+        press(&mut app, h, shift);
+        assert_eq!(window(&app), "tasks");
+        press(&mut app, h, shift);
+        assert_eq!(window(&app), "projects");
+        press(&mut app, h, shift);
+        assert_eq!(window(&app), "projects", "no wrap past Projects");
+    }
+
+    #[test]
+    fn p_with_empty_clipboard_stays_in_tasks() {
+        let (mut app, _dir) = build_test_app(false);
+        press(&mut app, egui::Key::P, egui::Modifiers::NONE);
+        assert_eq!(window(&app), "tasks");
+        assert!(
+            app.app_state.status_msg.is_some(),
+            "shows a 'nothing yanked' hint"
+        );
+    }
+
+    // --- paste ordering ---
+
+    #[test]
+    fn paste_orders_below_spreads_between_neighbours() {
+        let tasks = vec![task_with_order(1000), task_with_order(4000)];
+        assert_eq!(paste_orders(&tasks, Some(0), false, 2), vec![2000, 3000]);
+    }
+
+    #[test]
+    fn paste_orders_above_first_task_uses_zero_as_floor() {
+        let tasks = vec![task_with_order(3000)];
+        assert_eq!(paste_orders(&tasks, Some(0), true, 2), vec![1000, 2000]);
+    }
+
+    #[test]
+    fn paste_orders_below_last_task_leaves_room() {
+        let tasks = vec![task_with_order(1000)];
+        let o = paste_orders(&tasks, Some(0), false, 3);
+        assert!(o.windows(2).all(|w| w[0] < w[1]) && o[0] > 1000, "{o:?}");
+    }
+
+    #[test]
+    fn paste_orders_no_room_appends_at_end() {
+        let tasks = vec![
+            task_with_order(1000),
+            task_with_order(1001),
+            task_with_order(5000),
+        ];
+        assert_eq!(
+            paste_orders(&tasks, Some(0), false, 2),
+            vec![5000 + ORDER_GAP, 5000 + 2 * ORDER_GAP]
+        );
+    }
+
+    #[test]
+    fn paste_orders_without_cursor_appends() {
+        let tasks = vec![task_with_order(1000)];
+        assert_eq!(paste_orders(&tasks, None, false, 1), vec![1000 + ORDER_GAP]);
+    }
+
+    // --- new Normal-mode keys (full App::ui frame) ---
+
+    #[test]
+    fn gg_and_shift_g_jump_to_top_and_bottom() {
+        let (mut app, _dir) = build_test_app(false);
+        press(&mut app, egui::Key::G, egui::Modifiers::SHIFT);
+        assert_eq!(app.task_manager.current, Some(3));
+        press(&mut app, egui::Key::G, egui::Modifiers::NONE);
+        assert_eq!(
+            app.task_manager.current,
+            Some(3),
+            "single g does nothing yet"
+        );
+        press(&mut app, egui::Key::G, egui::Modifiers::NONE);
+        assert_eq!(app.task_manager.current, Some(0));
+    }
+
+    #[test]
+    fn g_then_other_key_cancels_gg() {
+        let (mut app, _dir) = build_test_app(false);
+        app.task_manager.current = Some(2);
+        press(&mut app, egui::Key::G, egui::Modifiers::NONE);
+        press(&mut app, egui::Key::K, egui::Modifiers::NONE);
+        press(&mut app, egui::Key::G, egui::Modifiers::NONE);
+        assert_eq!(
+            app.task_manager.current,
+            Some(1),
+            "k moved; gg was cancelled"
+        );
+    }
+
+    #[test]
+    fn ctrl_d_pages_down_without_completing() {
+        let (mut app, _dir) = build_test_app(false);
+        press(&mut app, egui::Key::D, egui::Modifiers::CTRL);
+        assert_eq!(app.task_manager.current, Some(3), "clamped to last row");
+        assert!(
+            app.task_manager
+                .tasks
+                .iter()
+                .all(|t| t.status != TaskStatus::Completed),
+            "Ctrl+D must not mark anything complete"
+        );
+        press(&mut app, egui::Key::U, egui::Modifiers::CTRL);
+        assert_eq!(app.task_manager.current, Some(0));
+    }
+
+    #[test]
+    fn arrow_keys_move_cursor() {
+        let (mut app, _dir) = build_test_app(false);
+        press(&mut app, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        press(&mut app, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(app.task_manager.current, Some(2));
+        press(&mut app, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        assert_eq!(app.task_manager.current, Some(1));
+    }
+
+    #[test]
+    fn enter_opens_info_pane() {
+        let (mut app, _dir) = build_test_app(false);
+        press(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(window(&app), "info");
+    }
+
+    #[test]
+    fn plus_minus_shift_priority_and_clamp() {
+        // One press per fresh app: a priority change triggers a background refresh
+        // from the (empty) temp DB, which would wipe the in-memory list mid-test.
+        let after = |start: Priority, key: egui::Key| {
+            let (mut app, _dir) = build_test_app(false);
+            app.task_manager.tasks[0].priority = start;
+            press(&mut app, key, egui::Modifiers::NONE);
+            app.task_manager.tasks[0].priority.clone()
+        };
+        assert_eq!(after(Priority::Low, egui::Key::Plus), Priority::Normal);
+        assert_eq!(after(Priority::Normal, egui::Key::Equals), Priority::Urgent);
+        assert_eq!(after(Priority::Urgent, egui::Key::Plus), Priority::Urgent);
+        assert_eq!(after(Priority::Urgent, egui::Key::Minus), Priority::Normal);
+        assert_eq!(after(Priority::Low, egui::Key::Minus), Priority::Low);
+    }
+
+    #[test]
+    fn brackets_switch_project() {
+        let (mut app, _dir) = build_test_app(false);
+        assert_eq!(app.project_manager.current_project, 0);
+        press(&mut app, egui::Key::CloseBracket, egui::Modifiers::NONE);
+        assert_eq!(app.project_manager.current_project, 1);
+        press(&mut app, egui::Key::CloseBracket, egui::Modifiers::NONE);
+        assert_eq!(app.project_manager.current_project, 1, "no wrap past last");
+        press(&mut app, egui::Key::OpenBracket, egui::Modifiers::NONE);
+        assert_eq!(app.project_manager.current_project, 0);
+        assert_eq!(window(&app), "tasks");
+    }
+
+    #[test]
+    fn yank_selection_copies_in_list_order_and_clears_selection() {
+        let (mut app, _dir) = build_test_app(false);
+        let ids: Vec<_> = app.task_manager.tasks.iter().map(|t| t.id).collect();
+        app.task_manager.selected_tasks.insert(ids[2]);
+        app.task_manager.selected_tasks.insert(ids[0]);
+        press(&mut app, egui::Key::Y, egui::Modifiers::NONE);
+        let got: Vec<_> = app.task_manager.clipboard.iter().map(|t| t.id).collect();
+        assert_eq!(got, vec![ids[0], ids[2]]);
+        assert!(app.task_manager.selected_tasks.is_empty());
+    }
+
+    #[test]
+    fn e_in_info_pane_enters_edit_mode() {
+        let (mut app, _dir) = build_test_app(false);
+        app.app_state.window_state = crate::ui::app::WindowState::Info;
+        press(&mut app, egui::Key::E, egui::Modifiers::NONE);
+        assert!(matches!(
+            app.app_state.mode,
+            crate::ui::app::Mode::Insert(Some(_))
+        ));
+    }
+
+    #[test]
+    fn esc_dismisses_error_banner_before_changing_pane() {
+        let (mut app, _dir) = build_test_app(false);
+        app.err_ui.push(
+            anyhow::anyhow!("boom"),
+            crate::ui::widgets::errors::ErrorSeverity::NonFatal,
+        );
+        press(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.err_ui.has_non_fatal());
+        assert_eq!(window(&app), "tasks", "Esc was spent on the banner");
     }
 }
