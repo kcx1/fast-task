@@ -1346,6 +1346,7 @@ dependencies = [
  "egui",
  "egui_extras",
  "jiff",
+ "parking_lot",
  "polodb_core",
  "reqwest",
  "resvg",
