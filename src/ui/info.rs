@@ -142,28 +142,33 @@ fn parse_due_text(text: &str) -> Option<jiff::civil::Date> {
     None
 }
 
+/// Load `task_id`'s notes if they aren't the ones currently held. The id is set
+/// synchronously so the fetch is spawned once, not every frame until it lands.
+fn ensure_annotations(app: &mut FastTask, task_id: ObjectId) {
+    if app.annotation_task_id == Some(task_id) {
+        return;
+    }
+    app.annotation_task_id = Some(task_id);
+    app.annotations.clear();
+    app.annotation_buf.clear();
+    app.annotation_cursor = None;
+    let tx = app.backend_manager.tx.clone();
+    crate::ui::bg::spawn(move || match DB.get_annotations(task_id) {
+        Ok(anns) => {
+            tx.send(UpdateMessage::Annotations(task_id, anns)).ok();
+        }
+        Err(e) => {
+            tx.send(UpdateMessage::Error(e)).ok();
+        }
+    });
+}
+
 pub fn info_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
     egui::CentralPanel::default().show_inside(ui, |ui| match &app.app_state.mode {
         Mode::Insert(_) => info_editor(ui, app),
         Mode::Normal | Mode::Visual => {
             if let Some(task) = app.task_manager.get_current_task() {
-                // Detect task change: set id synchronously then spawn a fetch.
-                if app.annotation_task_id != Some(task.id) {
-                    app.annotation_task_id = Some(task.id);
-                    app.annotations.clear();
-                    app.annotation_buf.clear();
-                    app.annotation_cursor = None;
-                    let task_id = task.id;
-                    let tx = app.backend_manager.tx.clone();
-                    crate::ui::bg::spawn(move || match DB.get_annotations(task_id) {
-                        Ok(anns) => {
-                            tx.send(UpdateMessage::Annotations(task_id, anns)).ok();
-                        }
-                        Err(e) => {
-                            tx.send(UpdateMessage::Error(e)).ok();
-                        }
-                    });
-                }
+                ensure_annotations(app, task.id);
 
                 egui::Frame::new()
                     .inner_margin(egui::Margin::same(12_i8))
@@ -436,7 +441,9 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
 
                 // Details — code-mode toggle inline with the label
                 ui.horizontal(|ui| {
-                    common::field_label(ui, "Details");
+                    common::field_label(ui, "Details").on_hover_text(
+                        "Free-form description (notes are a separate timestamped log)",
+                    );
                     ui.add_space(8.0);
                     let code = &mut app.task_manager.writer.code;
                     ui.checkbox(
@@ -659,6 +666,40 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
                             "Yearly",
                         );
                     });
+
+                // Notes are a timestamped log, separate from the free-form Details
+                // body; they're added from the Info pane, so here they're read-only.
+                if let Mode::Insert(Some(task_id)) = app.app_state.mode {
+                    ensure_annotations(app, task_id);
+                    ui.add_space(8.0);
+                    common::field_label(ui, "Notes")
+                        .on_hover_text("Timestamped log for this task (separate from Details)");
+                    if app.annotations.is_empty() {
+                        ui.label(
+                            egui::RichText::new("No notes yet.")
+                                .color(colors::OVERLAY1)
+                                .italics()
+                                .size(11.0),
+                        );
+                    }
+                    for ann in &app.annotations {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                egui::RichText::new(format_annotation_ts(&ann.created_at))
+                                    .color(colors::SUBTEXT0)
+                                    .size(11.0),
+                            );
+                            ui.label(egui::RichText::new(&ann.content).size(12.0));
+                        });
+                    }
+                    ui.label(
+                        egui::RichText::new(
+                            "Notes are added in the Info pane: Enter on a task, then a.",
+                        )
+                        .color(colors::OVERLAY1)
+                        .size(10.0),
+                    );
+                }
             }); // end ScrollArea
         }); // end Frame
 

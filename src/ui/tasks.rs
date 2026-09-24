@@ -2682,4 +2682,18 @@ mod tests {
         press(&mut app, egui::Key::N, egui::Modifiers::NONE);
         assert_eq!(app.tag_ui.mode, TagUiMode::Browse);
     }
+
+    #[test]
+    fn editing_a_task_loads_its_notes() {
+        let (mut app, _dir) = build_test_app(false);
+        let id = app.task_manager.tasks[2].id;
+        app.app_state.mode = crate::ui::app::Mode::Insert(Some(id));
+        app.app_state.window_state = crate::ui::app::WindowState::Info;
+        press(&mut app, egui::Key::F1, egui::Modifiers::NONE);
+        assert_eq!(
+            app.annotation_task_id,
+            Some(id),
+            "editor fetched this task's notes"
+        );
+    }
 }
