@@ -42,7 +42,7 @@ pub fn set_mode(ui: &egui::Ui, window: &WindowState, mode: &Mode) -> Option<Mode
 pub fn undo_redo(ui: &egui::Ui, tx: std::sync::mpsc::Sender<UpdateMessage>) -> anyhow::Result<()> {
     let undo_tx = tx.clone();
     if ui.input(|i| i.key_pressed(Key::U)) {
-        std::thread::spawn(move || {
+        crate::ui::bg::spawn(move || {
             if let Err(e) = DB.undo() {
                 let _ = tx.send(UpdateMessage::Error(e));
                 return;
@@ -52,7 +52,7 @@ pub fn undo_redo(ui: &egui::Ui, tx: std::sync::mpsc::Sender<UpdateMessage>) -> a
     }
 
     if ui.input(|i| i.key_pressed(Key::R)) {
-        std::thread::spawn(move || {
+        crate::ui::bg::spawn(move || {
             if let Err(e) = DB.redo() {
                 let _ = undo_tx.send(UpdateMessage::Error(e));
                 return;

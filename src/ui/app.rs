@@ -450,6 +450,12 @@ impl eframe::App for FastTask {
                         .on_hover_text("Window pinned above all others (Shift+A to toggle)");
                     }
 
+                    if crate::ui::bg::busy(std::time::Duration::from_millis(150)) {
+                        ui.separator();
+                        ui.add(egui::Spinner::new().size(11.0).color(colors::OVERLAY1))
+                            .on_hover_text("Working…");
+                    }
+
                     // Transient status message (Undone / Redone / Deleted hint)
                     let msg_expired = if let Some((msg, since)) = &self.app_state.status_msg {
                         if since.elapsed() < std::time::Duration::from_secs(3) {
@@ -551,7 +557,7 @@ impl FastTask {
 
     fn refresh_projects(&self) {
         let tx = self.backend_manager.tx.clone();
-        std::thread::spawn(move || match DB.all_projects() {
+        crate::ui::bg::spawn(move || match DB.all_projects() {
             Ok(real) => {
                 let projects = crate::ui::projects::assemble_project_list(real);
                 let _ = tx.send(UpdateMessage::Projects(projects));
@@ -587,7 +593,7 @@ impl FastTask {
 
     fn refresh_tags(&self) {
         let tx = self.backend_manager.tx.clone();
-        std::thread::spawn(move || {
+        crate::ui::bg::spawn(move || {
             if let Ok(tags) = DB.all_tags() {
                 let _ = tx.send(UpdateMessage::KnownTags(tags));
             }
@@ -605,7 +611,7 @@ impl FastTask {
             }
 
             let tx = self.backend_manager.tx.clone();
-            std::thread::spawn(move || {
+            crate::ui::bg::spawn(move || {
                 let entry = DB.get_recent_project().unwrap_or(ProjectEntry::All);
                 let _ = tx.send(UpdateMessage::CurrentProject(entry));
             });

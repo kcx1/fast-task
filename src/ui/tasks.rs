@@ -253,7 +253,7 @@ pub fn task_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
             let mut edit_clicked = false;
             egui::Panel::bottom("task_detail_bottom")
                 .resizable(true)
-                .default_size(160.0)
+                .default_size(90.0)
                 .show_inside(ui, |ui| {
                     edit_clicked = detail_panel(ui, current_task);
                 });
@@ -373,7 +373,7 @@ pub fn task_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
 }
 
 /// Read-only summary card for a task — title, details, and metadata grid.
-/// Used in both the bottom detail panel and the Info pane.
+/// Used in the Info pane; the bottom detail pane uses the compact `task_summary`.
 pub(crate) fn task_card(ui: &mut egui::Ui, task: &Task) {
     use crate::ui::theme::colors;
     use crate::ui::widgets::common;
@@ -430,6 +430,36 @@ pub(crate) fn task_card(ui: &mut egui::Ui, task: &Task) {
         });
 }
 
+/// Compact at-a-glance summary for the bottom detail pane: title plus one
+/// wrapped row of status / priority / due / tags. The details body and notes
+/// are left to the Info pane's full `task_card`.
+fn task_summary(ui: &mut egui::Ui, task: &Task) {
+    use crate::ui::theme::colors;
+    use crate::ui::widgets::common;
+    ui.label(egui::RichText::new(&task.title).size(14.0).strong());
+    ui.horizontal_wrapped(|ui| {
+        common::status_badge(ui, &task.status);
+        ui.label(
+            egui::RichText::new(task.priority.to_string())
+                .color(crate::ui::theme::priority_color(&task.priority)),
+        )
+        .on_hover_text("Priority");
+        if let Some(due) = task.due {
+            ui.label(egui::RichText::new(format_due_short(&due)).color(due_date_color(&due)))
+                .on_hover_text("Due");
+        }
+        if let Some(tags) = &task.tags {
+            for tag in tags {
+                ui.label(egui::RichText::new(format!("#{tag}")).color(colors::SUBTEXT0));
+            }
+        }
+        if !task.details.is_empty() {
+            ui.label(egui::RichText::new("…").color(colors::OVERLAY1))
+                .on_hover_text("Has details — open the task (i / e) to read them");
+        }
+    });
+}
+
 /// Renders the bottom detail pane. Returns `true` if the `✎ Edit` button was clicked
 /// (the caller enters Insert mode on the current task).
 fn detail_panel(ui: &mut egui::Ui, task: Option<Task>) -> bool {
@@ -451,7 +481,7 @@ fn detail_panel(ui: &mut egui::Ui, task: Option<Task>) -> bool {
                         }
                     });
                 });
-                task_card(ui, &task);
+                task_summary(ui, &task);
             } else {
                 ui.centered_and_justified(|ui| {
                     ui.label(
@@ -473,7 +503,7 @@ pub fn get_tasks(
     show_completed: bool,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || {
+    crate::ui::bg::spawn(move || {
         match backend
             .get_tasks(lookup)
             .context("No tasks found for the project")
@@ -497,7 +527,7 @@ pub(crate) fn task_submit_edit(
     task_id: ObjectId,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || match backend.one_task(task_id) {
+    crate::ui::bg::spawn(move || match backend.one_task(task_id) {
         Ok(Some(mut task)) => {
             task.title = writer.title_buffer.clone();
             task.details = writer.details_buffer.clone();
@@ -529,7 +559,7 @@ pub(crate) fn task_submit_create(
     project: ProjectEntry,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || {
+    crate::ui::bg::spawn(move || {
         let tags = parse_tags(&writer.tags_buffer);
         let task = Task {
             title: writer.title_buffer.clone(),
@@ -564,7 +594,7 @@ fn task_submit_paste(
     order: u64,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || {
+    crate::ui::bg::spawn(move || {
         let task = Task {
             title: source.title,
             details: source.details,
@@ -609,7 +639,7 @@ fn task_submit_delete(
     task_id: ObjectId,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || match backend.delete_task(task_id) {
+    crate::ui::bg::spawn(move || match backend.delete_task(task_id) {
         Ok(result) => {
             tx.send(UpdateMessage::DbTransaction(Box::new(result))).ok();
         }
@@ -624,7 +654,7 @@ fn task_submit_delete_many(
     ids: Vec<ObjectId>,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || {
+    crate::ui::bg::spawn(move || {
         for id in ids {
             if let Err(e) = backend.delete_task(id) {
                 let _ = tx.send(UpdateMessage::Error(e));
@@ -641,7 +671,7 @@ fn task_submit_set_status(
     status: TaskStatus,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || match backend.one_task(task_id) {
+    crate::ui::bg::spawn(move || match backend.one_task(task_id) {
         Ok(Some(mut task)) => {
             if status == TaskStatus::Completed
                 && let Some(recurrence) = &task.recurrence
@@ -703,7 +733,7 @@ fn task_submit_set_status_many(
     status: TaskStatus,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    std::thread::spawn(move || {
+    crate::ui::bg::spawn(move || {
         for id in ids {
             match backend.one_task(id) {
                 Ok(Some(mut task)) => {
@@ -1279,7 +1309,7 @@ fn swap_tasks(app: &mut FastTask, backend: Backend, a: usize, b: usize) {
         let tb = app.task_manager.tasks[b].clone();
         app.task_manager.tasks.swap(a, b);
         let tx = app.backend_manager.tx.clone();
-        std::thread::spawn(move || {
+        crate::ui::bg::spawn(move || {
             for task in [ta, tb] {
                 match backend.update_task(task) {
                     Ok(r) => {

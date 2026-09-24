@@ -154,7 +154,7 @@ pub fn info_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
                     app.annotation_buf.clear();
                     let task_id = task.id;
                     let tx = app.backend_manager.tx.clone();
-                    std::thread::spawn(move || match DB.get_annotations(task_id) {
+                    crate::ui::bg::spawn(move || match DB.get_annotations(task_id) {
                         Ok(anns) => {
                             tx.send(UpdateMessage::Annotations(task_id, anns)).ok();
                         }
@@ -235,7 +235,7 @@ pub fn info_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
                         if let Some(ann_id) = to_delete {
                             let task_id = task.id;
                             let tx = app.backend_manager.tx.clone();
-                            std::thread::spawn(move || {
+                            crate::ui::bg::spawn(move || {
                                 if let Err(e) = DB.delete_annotation(ann_id) {
                                     let _ = tx.send(UpdateMessage::Error(e));
                                     return;
@@ -276,7 +276,7 @@ pub fn info_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
                             };
                             let task_id = task.id;
                             let tx = app.backend_manager.tx.clone();
-                            std::thread::spawn(move || {
+                            crate::ui::bg::spawn(move || {
                                 if let Err(e) = DB.add_annotation(annotation) {
                                     let _ = tx.send(UpdateMessage::Error(e));
                                     return;
