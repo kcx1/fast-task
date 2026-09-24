@@ -51,4 +51,12 @@ pub trait TaskManagement {
 pub trait TagManagement {
     fn all_tags(&self) -> anyhow::Result<Vec<String>>;
     fn upsert_tags(&self, tags: &[String]) -> anyhow::Result<()>;
+    /// Every tag (stored or in use on a task) with how many tasks carry it, sorted by name.
+    fn tag_usage(&self) -> anyhow::Result<Vec<(String, usize)>>;
+    /// Rename `from` to `to` in the tag store and on every task that has it.
+    /// Returns the number of tasks changed.
+    fn rename_tag(&self, from: &str, to: &str) -> anyhow::Result<usize>;
+    /// Remove `name` from the tag store and from every task that has it.
+    /// Returns the number of tasks changed.
+    fn delete_tag(&self, name: &str) -> anyhow::Result<usize>;
 }

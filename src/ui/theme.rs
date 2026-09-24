@@ -50,6 +50,7 @@ pub mod icons {
     pub const MODE_VISUAL: &str = "\u{F0208}"; // nf-md-eye
 
     pub const PIN: &str = "\u{F0231}"; // nf-md-pin
+    pub const TAG: &str = "\u{F04F9}"; // nf-md-tag
 }
 
 /// Apply the Catppuccin Macchiato theme. Call once on app startup.

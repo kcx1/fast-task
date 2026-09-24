@@ -521,123 +521,7 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
                         }
                     }
                 }
-                let tags_resp = ui.add(
-                    egui::TextEdit::singleline(&mut app.task_manager.writer.tags_buffer)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("work, urgent, …  (comma-separated)"),
-                );
-
-                // Autocomplete suggestions
-                {
-                    let partial = app
-                        .task_manager
-                        .writer
-                        .tags_buffer
-                        .rsplit(',')
-                        .next()
-                        .unwrap_or("")
-                        .trim()
-                        .to_lowercase();
-
-                    let suggestions: Vec<String> =
-                        if !partial.is_empty() && !app.known_tags.is_empty() {
-                            app.known_tags
-                                .iter()
-                                .filter(|t| t.to_lowercase().starts_with(&partial))
-                                .take(5)
-                                .cloned()
-                                .collect()
-                        } else {
-                            Vec::new()
-                        };
-
-                    if suggestions.is_empty() {
-                        app.task_manager.tag_suggestion_idx = None;
-                    } else {
-                        // Keep the highlight in range as the list changes while typing.
-                        if let Some(i) = app.task_manager.tag_suggestion_idx
-                            && i >= suggestions.len()
-                        {
-                            app.task_manager.tag_suggestion_idx = None;
-                        }
-
-                        // Keyboard navigation is active only while the tags field has focus.
-                        // Keys are consumed so they don't reach the form-submit handler
-                        // (Enter) or move widget focus (Tab).
-                        let mut chosen: Option<String> = None;
-                        if tags_resp.has_focus() {
-                            let idx = &mut app.task_manager.tag_suggestion_idx;
-                            if ui.input_mut(|i| {
-                                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
-                            }) {
-                                *idx = Some(match *idx {
-                                    None => 0,
-                                    Some(i) => (i + 1).min(suggestions.len() - 1),
-                                });
-                            }
-                            if ui.input_mut(|i| {
-                                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
-                            }) {
-                                *idx = match *idx {
-                                    None | Some(0) => None,
-                                    Some(i) => Some(i - 1),
-                                };
-                            }
-                            // Tab accepts the highlighted suggestion (or the first).
-                            if ui
-                                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
-                            {
-                                chosen = suggestions.get(idx.unwrap_or(0)).cloned();
-                            }
-                            // Enter accepts only when a suggestion is explicitly highlighted;
-                            // otherwise it falls through to the form-submit handler below.
-                            if let Some(i) = *idx
-                                && ui.input_mut(|i| {
-                                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
-                                })
-                            {
-                                chosen = suggestions.get(i).cloned();
-                            }
-                        }
-
-                        let highlight = app.task_manager.tag_suggestion_idx;
-                        egui::Frame::new()
-                            .fill(colors::SURFACE0)
-                            .stroke(egui::Stroke::new(1.0_f32, colors::SURFACE1))
-                            .inner_margin(egui::Margin::same(4_i8))
-                            .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                for (i, suggestion) in suggestions.iter().enumerate() {
-                                    if ui
-                                        .selectable_label(
-                                            highlight == Some(i),
-                                            egui::RichText::new(suggestion)
-                                                .color(colors::TEAL)
-                                                .size(11.0),
-                                        )
-                                        .clicked()
-                                    {
-                                        chosen = Some(suggestion.clone());
-                                    }
-                                }
-                            });
-
-                        if let Some(tag) = chosen {
-                            let buf = &mut app.task_manager.writer.tags_buffer;
-                            if let Some(last_comma) = buf.rfind(',') {
-                                buf.truncate(last_comma + 1);
-                                buf.push(' ');
-                                buf.push_str(&tag);
-                                buf.push_str(", ");
-                            } else {
-                                *buf = format!("{}, ", tag);
-                            }
-                            app.task_manager.tag_suggestion_idx = None;
-                            // Keep typing in the tags field after accepting.
-                            tags_resp.request_focus();
-                        }
-                    }
-                }
+                tag_input(ui, app);
 
                 ui.add_space(4.0);
 
@@ -835,4 +719,192 @@ fn discard(app: &mut FastTask) {
     app.task_manager.writer.flush();
     app.app_state.mode = Mode::Normal;
     app.app_state.window_state = WindowState::Tasks;
+}
+
+/// Tags field with a blink.cmp-style completion menu.
+///
+/// The menu fuzzy-matches the segment after the last comma against known tags
+/// (skipping tags already typed), opens as you type with the best match
+/// highlighted, and never takes focus: Tab accepts, ↓/↑ or Ctrl+N/P (Shift+Tab
+/// for previous) move, Enter accepts only once you've moved, Esc / Ctrl+E closes
+/// it until the text changes. With the menu closed, Tab moves to the next field.
+fn tag_input(ui: &mut egui::Ui, app: &mut FastTask) {
+    use crate::ui::fuzzy;
+    use crate::ui::theme::colors;
+    use egui::{Key, Modifiers};
+
+    const MAX_ITEMS: usize = 8;
+    let id = egui::Id::new("tag_input");
+    let tm = &mut app.task_manager;
+
+    let buf = &tm.writer.tags_buffer;
+    let (head, partial) = match buf.rfind(',') {
+        Some(i) => (&buf[..i], buf[i + 1..].trim()),
+        None => ("", buf.trim()),
+    };
+    let partial = partial.to_string();
+    let typed: Vec<String> = head
+        .split(',')
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    // New text → fresh menu: highlight back on the top item, un-dismiss.
+    if tm.tag_menu_query != partial {
+        tm.tag_menu_query = partial.clone();
+        tm.tag_suggestion_idx = None;
+        tm.tag_menu_dismissed = false;
+    }
+
+    let items: Vec<(String, Vec<usize>)> = if tm.tag_menu_dismissed {
+        Vec::new()
+    } else {
+        fuzzy::rank(
+            &partial,
+            app.known_tags
+                .iter()
+                .filter(|t| !typed.contains(&t.to_lowercase())),
+        )
+        .into_iter()
+        .take(MAX_ITEMS)
+        .map(|(t, m)| (t.clone(), m.positions))
+        .collect()
+    };
+    let menu_open = !items.is_empty();
+    if let Some(i) = tm.tag_suggestion_idx
+        && i >= items.len()
+    {
+        tm.tag_suggestion_idx = None;
+    }
+
+    // Keys are read *before* the TextEdit is drawn and consumed, so neither the
+    // field (cursor moves) nor egui's focus traversal (Tab) nor the form's
+    // Enter / Esc handlers see them.
+    let focused = ui.memory(|m| m.has_focus(id));
+    let mut accept: Option<String> = None;
+    if focused && menu_open {
+        let n = items.len();
+        let cur = tm.tag_suggestion_idx;
+        let (next, prev, tab, enter, close) = ui.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::ArrowDown)
+                    || i.consume_key(Modifiers::CTRL, Key::N),
+                i.consume_key(Modifiers::NONE, Key::ArrowUp)
+                    || i.consume_key(Modifiers::CTRL, Key::P)
+                    || i.consume_key(Modifiers::SHIFT, Key::Tab),
+                i.consume_key(Modifiers::NONE, Key::Tab),
+                cur.is_some() && i.consume_key(Modifiers::NONE, Key::Enter),
+                i.consume_key(Modifiers::NONE, Key::Escape)
+                    || i.consume_key(Modifiers::CTRL, Key::E),
+            )
+        });
+        if next {
+            tm.tag_suggestion_idx = Some(cur.map_or(1 % n, |c| (c + 1) % n));
+        }
+        if prev {
+            tm.tag_suggestion_idx = Some(cur.map_or(n - 1, |c| (c + n - 1) % n));
+        }
+        if tab || enter {
+            accept = items
+                .get(tm.tag_suggestion_idx.unwrap_or(0))
+                .map(|(t, _)| t.clone());
+        }
+        if close {
+            tm.tag_menu_dismissed = true;
+        }
+    }
+
+    // Mouse: clicking an item accepts it (handled below, after layout).
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut tm.writer.tags_buffer)
+            .id(id)
+            .desired_width(f32::INFINITY)
+            .hint_text("work, urgent, …  (comma-separated, Tab completes)"),
+    );
+    // While the menu is open the field keeps Tab (accept) and Esc (close menu)
+    // instead of egui moving / dropping focus at the start of the next frame.
+    if menu_open && !tm.tag_menu_dismissed {
+        ui.memory_mut(|m| {
+            m.set_focus_lock_filter(
+                id,
+                egui::EventFilter {
+                    tab: true,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: true,
+                },
+            )
+        });
+    }
+
+    if menu_open && !tm.tag_menu_dismissed && accept.is_none() {
+        let highlight = tm.tag_suggestion_idx.unwrap_or(0);
+        egui::Frame::new()
+            .fill(colors::SURFACE0)
+            .stroke(egui::Stroke::new(1.0_f32, colors::SURFACE1))
+            .inner_margin(egui::Margin::same(4_i8))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 1.0;
+                for (i, (tag, positions)) in items.iter().enumerate() {
+                    let selected = i == highlight;
+                    let mut job = egui::text::LayoutJob::default();
+                    for (ci, ch) in tag.chars().enumerate() {
+                        let hit = positions.contains(&ci);
+                        job.append(
+                            &ch.to_string(),
+                            0.0,
+                            egui::TextFormat {
+                                font_id: egui::FontId::proportional(12.0),
+                                color: if hit { colors::PEACH } else { colors::TEAL },
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    let fill = if selected {
+                        colors::SURFACE1
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let row = egui::Frame::new()
+                        .fill(fill)
+                        .corner_radius(egui::CornerRadius::same(3))
+                        .inner_margin(egui::Margin::symmetric(4, 1))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            // Click-only (not FOCUSABLE) so the menu never takes focus.
+                            ui.add(egui::Label::new(job).sense(egui::Sense::CLICK))
+                        });
+                    if row.inner.clicked() || row.response.interact(egui::Sense::CLICK).clicked() {
+                        accept = Some(tag.clone());
+                    }
+                }
+                ui.label(
+                    egui::RichText::new("Tab accept · ↓↑ move · Esc close")
+                        .color(colors::OVERLAY1)
+                        .size(10.0),
+                );
+            });
+    }
+
+    if let Some(tag) = accept {
+        let buf = &mut tm.writer.tags_buffer;
+        let head = buf.rfind(',').map(|i| buf[..=i].to_string());
+        *buf = match head {
+            Some(h) => format!("{h} {tag}, "),
+            None => format!("{tag}, "),
+        };
+        tm.tag_suggestion_idx = None;
+        // Keep typing in the field, cursor at the end.
+        let end = buf.chars().count();
+        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(end),
+                )));
+            state.store(ui.ctx(), id);
+        }
+        resp.request_focus();
+    }
 }

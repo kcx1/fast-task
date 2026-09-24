@@ -83,6 +83,8 @@ pub struct FastTask {
     pub annotation_buf: String,
     /// Keyboard-highlighted note in the Info pane (`j` / `k`, `x` deletes).
     pub annotation_cursor: Option<usize>,
+    /// Tag manager popup (`Shift+T`).
+    pub tag_ui: crate::ui::tags::TagUi,
 }
 impl Default for FastTask {
     fn default() -> Self {
@@ -122,6 +124,7 @@ impl Default for FastTask {
             annotation_task_id: None,
             annotation_buf: String::new(),
             annotation_cursor: None,
+            tag_ui: Default::default(),
             app_type,
         }
     }
@@ -152,6 +155,8 @@ pub enum UpdateMessage {
     CurrentProject(ProjectEntry),
     Tasks(Vec<Task>),
     KnownTags(Vec<String>),
+    /// `(tag, task count)` rows for the tag manager popup.
+    TagUsage(Vec<(String, usize)>),
     Annotations(polodb_core::bson::oid::ObjectId, Vec<Annotation>),
     Error(Error),
     DbTransaction(Box<dyn Send + Debug>),
@@ -294,6 +299,7 @@ impl eframe::App for FastTask {
         // after it returns (toggle needs `&mut self` for `refresh_tasks`).
         let mut new_sort: Option<crate::ui::tasks::SortOrder> = None;
         let mut toggle_completed = false;
+        let mut open_tags = false;
 
         egui::Panel::top("Top Panel").show_inside(ui, |ui| {
             use crate::ui::tasks::SortOrder;
@@ -368,6 +374,14 @@ impl eframe::App for FastTask {
                 {
                     toggle_completed = true;
                 }
+
+                if ui
+                    .selectable_label(false, icons::TAG)
+                    .on_hover_text("Manage tags (Shift+T)")
+                    .clicked()
+                {
+                    open_tags = true;
+                }
             });
         });
 
@@ -380,6 +394,9 @@ impl eframe::App for FastTask {
         if toggle_completed {
             self.task_manager.show_completed = !self.task_manager.show_completed;
             self.refresh_tasks();
+        }
+        if open_tags {
+            self.tag_ui.open(self.backend_manager.tx.clone());
         }
 
         // Status bar — always visible
@@ -505,7 +522,25 @@ impl eframe::App for FastTask {
 
         // Gate all global keybinds while any text widget has keyboard focus so that typing
         // in e.g. the annotation input doesn't fire navigation or undo/redo actions.
+        // Tag manager popup owns the keyboard while open: it handles its own keys,
+        // then every remaining key / text event is dropped so panes and global
+        // keybinds don't react underneath it.
+        if self.tag_ui.open {
+            crate::ui::tags::tag_manager(ui, self);
+            ui.input_mut(|i| {
+                i.events
+                    .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)))
+            });
+        }
+
         if !ui.ctx().egui_wants_keyboard_input() {
+            // Shift+T opens the tag manager from Normal mode.
+            if matches!(self.app_state.mode, Mode::Normal)
+                && !self.tag_ui.open
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::T))
+            {
+                self.tag_ui.open(self.backend_manager.tx.clone());
+            }
             // Esc dismisses the newest error banner before it does anything else
             // (leave mode, clear filter, change pane).
             if self.err_ui.has_non_fatal()
@@ -682,6 +717,9 @@ impl FastTask {
                     // reset only on an explicit project switch (see `select_project`).
                     // Cursor clamping is handled each frame in task_state.
                 }
+                UpdateMessage::TagUsage(rows) => {
+                    self.tag_ui.rows = rows;
+                }
                 UpdateMessage::KnownTags(tags) => {
                     self.known_tags = tags;
                 }
@@ -729,6 +767,7 @@ fn show_help_popup(ctx: &egui::Context, mode: &Mode, window: &WindowState, show:
             ("", ""),
             ("View", ""),
             ("Shift+L / t", "Go to Tasks pane"),
+            ("Shift+T", "Manage tags"),
             ("?", "Toggle this help"),
         ],
         (Mode::Normal, WindowState::Info) => &[
@@ -740,6 +779,7 @@ fn show_help_popup(ctx: &egui::Context, mode: &Mode, window: &WindowState, show:
             ("", ""),
             ("View", ""),
             ("Shift+H / Esc", "Back to Tasks pane"),
+            ("Shift+T", "Manage tags"),
             ("u / r", "Undo / Redo"),
             ("?", "Toggle this help"),
         ],
@@ -770,6 +810,7 @@ fn show_help_popup(ctx: &egui::Context, mode: &Mode, window: &WindowState, show:
             ("Shift+K", "Toggle detail pane"),
             ("Shift+C", "Show / hide completed tasks"),
             ("Shift+A", "Toggle always-on-top"),
+            ("Shift+T", "Manage tags (new / rename / delete)"),
             (
                 "Shift+H / Shift+L",
                 "Previous / next pane (Projects ↔ Tasks ↔ Info)",
@@ -792,6 +833,13 @@ fn show_help_popup(ctx: &egui::Context, mode: &Mode, window: &WindowState, show:
             ("Ctrl/Cmd+Enter", "Save & Done (mark completed)"),
             ("Shift+Enter", "Insert newline in Details field"),
             ("Tab / Shift+Tab", "Next / previous field"),
+            ("", ""),
+            ("Tag completion", ""),
+            ("Tab", "Accept highlighted tag"),
+            ("↓ / ↑  or  Ctrl+N / Ctrl+P", "Move in the menu"),
+            ("Enter", "Accept (after moving) — otherwise saves"),
+            ("Esc / Ctrl+E", "Close the menu"),
+            ("", ""),
             ("Space", "Press the focused button / toggle checkbox"),
             ("Esc", "Clear field focus / Discard (press twice)"),
         ],
