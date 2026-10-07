@@ -2,7 +2,6 @@ use anyhow::Context;
 use egui::InnerResponse;
 use egui::Key;
 use egui::Sense;
-use jiff::civil::Date;
 use polodb_core::bson::DateTime;
 use polodb_core::bson::oid::ObjectId;
 
@@ -14,6 +13,7 @@ use crate::ui::app::FastTask;
 use crate::ui::app::Mode;
 use crate::ui::app::UpdateMessage;
 use crate::ui::app::WindowState;
+use crate::ui::view::{due_date_color, format_due_short, task_summary};
 
 /// Shared reference to any `TaskManagement` implementation; passed to all background ops.
 type Backend = std::sync::Arc<dyn TaskManagement + Send + Sync>;
@@ -75,15 +75,7 @@ pub struct TaskWriter {
     pub initial_frame: bool,
 }
 
-/// Converts a `jiff` civil date to a BSON `DateTime` at midnight UTC.
-pub fn from_jiff_to_datetime(dt: Date) -> Option<DateTime> {
-    DateTime::builder()
-        .year(dt.year() as i32)
-        .month(dt.month() as u8)
-        .day(dt.day() as u8)
-        .build()
-        .ok()
-}
+pub use crate::database::models::from_jiff_to_datetime;
 
 impl Default for TaskWriter {
     fn default() -> Self {
@@ -193,9 +185,7 @@ impl TaskManager {
             .enumerate()
             .filter(|(_, t)| {
                 // Hide tasks whose wait_until is in the future
-                if let Some(wait) = &t.wait_until
-                    && wait.timestamp_millis() > now_ms
-                {
+                if crate::ui::view::is_waiting(t, now_ms) {
                     return false;
                 }
                 if q.is_empty() {
@@ -384,94 +374,6 @@ pub fn task_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
     })
 }
 
-/// Read-only summary card for a task — title, details, and metadata grid.
-/// Used in the Info pane; the bottom detail pane uses the compact `task_summary`.
-pub(crate) fn task_card(ui: &mut egui::Ui, task: &Task) {
-    use crate::ui::theme::colors;
-    use crate::ui::widgets::common;
-    ui.label(egui::RichText::new(&task.title).size(16.0).strong());
-    ui.separator();
-    if !task.details.is_empty() {
-        egui::ScrollArea::vertical()
-            .id_salt("task_card_details")
-            .show(ui, |ui| {
-                crate::ui::widgets::code::details_view(ui, &task.details, task.code, task.language);
-            });
-        ui.add_space(4.0);
-    }
-    egui::Grid::new("task_card_grid")
-        .num_columns(2)
-        .spacing([8.0, 4.0])
-        .show(ui, |ui| {
-            common::field_label(ui, "Status");
-            common::status_badge(ui, &task.status);
-            ui.end_row();
-
-            common::field_label(ui, "Priority");
-            ui.label(
-                egui::RichText::new(task.priority.to_string())
-                    .color(crate::ui::theme::priority_color(&task.priority)),
-            );
-            ui.end_row();
-
-            if let Some(due) = task.due {
-                common::field_label(ui, "Due");
-                ui.label(egui::RichText::new(format_due_short(&due)).color(due_date_color(&due)));
-                ui.end_row();
-            }
-
-            if let Some(tags) = &task.tags
-                && !tags.is_empty()
-            {
-                common::field_label(ui, "Tags");
-                ui.label(tags.join(", "));
-                ui.end_row();
-            }
-
-            if let Some(wait) = task.wait_until {
-                common::field_label(ui, "Hidden until");
-                ui.label(egui::RichText::new(format_due_short(&wait)).color(colors::SUBTEXT0));
-                ui.end_row();
-            }
-
-            if let Some(recurrence) = &task.recurrence {
-                common::field_label(ui, "Recurrence");
-                ui.label(egui::RichText::new(recurrence.to_string()).color(colors::TEAL));
-                ui.end_row();
-            }
-        });
-}
-
-/// Compact at-a-glance summary for the bottom detail pane: title plus one
-/// wrapped row of status / priority / due / tags. The details body and notes
-/// are left to the Info pane's full `task_card`.
-fn task_summary(ui: &mut egui::Ui, task: &Task) {
-    use crate::ui::theme::colors;
-    use crate::ui::widgets::common;
-    ui.label(egui::RichText::new(&task.title).size(14.0).strong());
-    ui.horizontal_wrapped(|ui| {
-        common::status_badge(ui, &task.status);
-        ui.label(
-            egui::RichText::new(task.priority.to_string())
-                .color(crate::ui::theme::priority_color(&task.priority)),
-        )
-        .on_hover_text("Priority");
-        if let Some(due) = task.due {
-            ui.label(egui::RichText::new(format_due_short(&due)).color(due_date_color(&due)))
-                .on_hover_text("Due");
-        }
-        if let Some(tags) = &task.tags {
-            for tag in tags {
-                ui.label(egui::RichText::new(format!("#{tag}")).color(colors::SUBTEXT0));
-            }
-        }
-        if !task.details.is_empty() {
-            ui.label(egui::RichText::new("…").color(colors::OVERLAY1))
-                .on_hover_text("Has details — open the task (i / e) to read them");
-        }
-    });
-}
-
 /// Renders the bottom detail pane. Returns `true` if the `✎ Edit` button was clicked
 /// (the caller enters Insert mode on the current task).
 fn detail_panel(ui: &mut egui::Ui, task: Option<Task>) -> bool {
@@ -567,7 +469,7 @@ pub(crate) fn task_submit_edit(
         });
         // Save & Done (or picking Completed) on a recurring task schedules the next one.
         if let Some(done) = just_completed
-            && let Some(next) = next_occurrence(&done)
+            && let Some(next) = done.next_occurrence()
             && let Err(e) = backend.create_task(next)
         {
             let _ = tx.send(UpdateMessage::Error(e));
@@ -701,7 +603,7 @@ fn task_submit_set_status(
     status: TaskStatus,
     tx: std::sync::mpsc::Sender<UpdateMessage>,
 ) {
-    crate::ui::bg::spawn(move || match apply_status(&backend, task_id, &status) {
+    crate::ui::bg::spawn(move || match backend.set_status(task_id, &status) {
         Ok(Some(result)) => {
             tx.send(UpdateMessage::DbTransaction(Box::new(result))).ok();
         }
@@ -715,64 +617,6 @@ fn task_submit_set_status(
     });
 }
 
-/// Set one task's status as an atomic read-modify-write. Completing a recurring
-/// task (that wasn't already completed) also creates its next occurrence.
-/// Shared by the single and bulk paths so both handle recurrence.
-fn apply_status(
-    backend: &Backend,
-    task_id: ObjectId,
-    status: &TaskStatus,
-) -> anyhow::Result<Option<ObjectId>> {
-    let mut just_completed: Option<Task> = None;
-    let result = backend.modify_task(task_id, &mut |task| {
-        if *status == TaskStatus::Completed
-            && task.status != TaskStatus::Completed
-            && task.recurrence.is_some()
-        {
-            just_completed = Some(task.clone());
-        }
-        task.status = status.clone();
-    })?;
-    if let Some(task) = just_completed
-        && let Some(next) = next_occurrence(&task)
-    {
-        backend.create_task(next)?;
-    }
-    Ok(result)
-}
-
-/// The next instance of a recurring `task`, due one period after its due date
-/// (or today, if it has none).
-fn next_occurrence(task: &Task) -> Option<Task> {
-    let recurrence = task.recurrence.as_ref()?;
-    let base = task
-        .due
-        .as_ref()
-        .and_then(bson_dt_to_jiff_date)
-        .unwrap_or_else(|| jiff::Zoned::now().date());
-    let span = match recurrence {
-        Recurrence::Daily => jiff::Span::new().days(1i64),
-        Recurrence::Weekly => jiff::Span::new().weeks(1i64),
-        Recurrence::Monthly => jiff::Span::new().months(1i64),
-        Recurrence::Yearly => jiff::Span::new().years(1i64),
-    };
-    let next_date = base.checked_add(span).ok()?;
-    Some(Task {
-        title: task.title.clone(),
-        details: task.details.clone(),
-        priority: task.priority.clone(),
-        tags: task.tags.clone(),
-        code: task.code,
-        language: task.language,
-        project_id: task.project_id,
-        recurrence: task.recurrence.clone(),
-        wait_until: task.wait_until,
-        due: from_jiff_to_datetime(next_date),
-        order: task.get_next_gap(),
-        ..Default::default()
-    })
-}
-
 fn task_submit_set_status_many(
     backend: Backend,
     ids: Vec<ObjectId>,
@@ -781,7 +625,7 @@ fn task_submit_set_status_many(
 ) {
     crate::ui::bg::spawn(move || {
         for id in ids {
-            if let Err(e) = apply_status(&backend, id, &status) {
+            if let Err(e) = backend.set_status(id, &status) {
                 let _ = tx.send(UpdateMessage::Error(e));
                 return;
             }
@@ -988,8 +832,12 @@ fn sort_picker_modal(ui: &mut egui::Ui, app: &mut FastTask) {
             } else {
                 colors::TEXT
             };
-            let prefix = if is_active { "✓ " } else { "  " };
-            let text = egui::RichText::new(format!("{}{}  {}", prefix, idx + 1, label))
+            let prefix = if is_active {
+                crate::ui::theme::icons::CHECK
+            } else {
+                " "
+            };
+            let text = egui::RichText::new(format!("{} {}  {}", prefix, idx + 1, label))
                 .color(color)
                 .size(13.0);
             let fill = if is_selected {
@@ -1547,55 +1395,6 @@ fn swap_tasks(app: &mut FastTask, backend: Backend, a: usize, b: usize) {
     }
 }
 
-/// Converts a BSON `DateTime` to a `jiff` civil date in UTC.
-pub(crate) fn bson_dt_to_jiff_date(dt: &DateTime) -> Option<jiff::civil::Date> {
-    let ts = jiff::Timestamp::from_millisecond(dt.timestamp_millis()).ok()?;
-    Some(ts.to_zoned(jiff::tz::TimeZone::UTC).date())
-}
-
-/// Formats a due date as "Mon D" (current year) or "Mon D, YYYY" (other years).
-pub(crate) fn format_due_short(dt: &DateTime) -> String {
-    let Some(date) = bson_dt_to_jiff_date(dt) else {
-        return String::new();
-    };
-    let today = jiff::Zoned::now().date();
-    let month = match date.month() {
-        1 => "Jan",
-        2 => "Feb",
-        3 => "Mar",
-        4 => "Apr",
-        5 => "May",
-        6 => "Jun",
-        7 => "Jul",
-        8 => "Aug",
-        9 => "Sep",
-        10 => "Oct",
-        11 => "Nov",
-        _ => "Dec",
-    };
-    if date.year() == today.year() {
-        format!("{} {}", month, date.day())
-    } else {
-        format!("{} {}, {}", month, date.day(), date.year())
-    }
-}
-
-/// Returns RED for overdue, YELLOW for today, SUBTEXT0 for future dates.
-pub(crate) fn due_date_color(dt: &DateTime) -> egui::Color32 {
-    use crate::ui::theme::colors;
-    let Some(date) = bson_dt_to_jiff_date(dt) else {
-        return colors::SUBTEXT0;
-    };
-    let today = jiff::Zoned::now().date();
-    if date < today {
-        colors::RED
-    } else if date == today {
-        colors::YELLOW
-    } else {
-        colors::SUBTEXT0
-    }
-}
-
 /// An action a mouse user triggered from a task row's hover icons (or the
 /// clickable status glyph). Dispatched by `task_state` through the same
 /// `task_submit_*` / mode paths the keyboard uses, giving mouse parity.
@@ -1687,22 +1486,9 @@ fn task_table(
 
                         use crate::ui::theme::icons;
                         let status_sym = if is_tab_sel && !is_cursor {
-                            "✓"
+                            icons::CHECK
                         } else {
-                            match task.status {
-                                crate::database::models::TaskStatus::NotStarted => {
-                                    icons::STATUS_NOT_STARTED
-                                }
-                                crate::database::models::TaskStatus::InProgress => {
-                                    icons::STATUS_IN_PROGRESS
-                                }
-                                crate::database::models::TaskStatus::OnHold => {
-                                    icons::STATUS_ON_HOLD
-                                }
-                                crate::database::models::TaskStatus::Completed => {
-                                    icons::STATUS_COMPLETED
-                                }
-                            }
+                            crate::ui::view::status_icon(&task.status)
                         };
                         let status_color = if is_highlighted {
                             colors::MANTLE
@@ -1710,11 +1496,7 @@ fn task_table(
                             crate::ui::theme::status_color(&task.status)
                         };
 
-                        let priority_hint = match task.priority {
-                            Priority::Urgent => icons::PRIORITY_URGENT,
-                            Priority::Normal => "",
-                            Priority::Low => icons::PRIORITY_LOW,
-                        };
+                        let priority_hint = crate::ui::view::priority_icon(&task.priority);
                         let priority_color = if is_highlighted {
                             colors::MANTLE
                         } else {
@@ -1769,54 +1551,60 @@ fn task_table(
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.add_space(6.0);
-                            // On hover, the right edge shows the action icons (edit /
-                            // complete / delete) in place of the due date; otherwise
-                            // the due date. Same rect either way, so no layout jump
-                            // fights the buttons for the pointer.
-                            if row_hovered {
-                                // On highlighted rows (BLUE / TEAL_DIM fill) the semantic
-                                // icon colors would wash out — notably a BLUE edit icon on
-                                // the BLUE cursor row — so fall back to MANTLE like the
-                                // rest of the row's content does.
-                                let (c_delete, c_complete, c_edit) = if is_highlighted {
-                                    (colors::MANTLE, colors::MANTLE, colors::MANTLE)
-                                } else {
-                                    (colors::RED, colors::GREEN, colors::BLUE)
-                                };
-                                // right_to_left: first added sits rightmost.
-                                if row_icon_button(ui, icons::DELETE, c_delete)
-                                    .on_hover_text("Delete (Shift+D)")
-                                    .clicked()
-                                {
-                                    action.set(Some(RowAction::Delete(task.id)));
-                                    consumed = true;
+                            // One scope either way, so the hover icons (three widgets)
+                            // vs. the due date (one) don't shift the auto ids of the
+                            // title section below — that id change on every hover in /
+                            // out is what egui's debug build outlines in red.
+                            ui.scope(|ui| {
+                                // On hover, the right edge shows the action icons (edit /
+                                // complete / delete) in place of the due date; otherwise
+                                // the due date. Same rect either way, so no layout jump
+                                // fights the buttons for the pointer.
+                                if row_hovered {
+                                    // On highlighted rows (BLUE / TEAL_DIM fill) the semantic
+                                    // icon colors would wash out — notably a BLUE edit icon on
+                                    // the BLUE cursor row — so fall back to MANTLE like the
+                                    // rest of the row's content does.
+                                    let (c_delete, c_complete, c_edit) = if is_highlighted {
+                                        (colors::MANTLE, colors::MANTLE, colors::MANTLE)
+                                    } else {
+                                        (colors::RED, colors::GREEN, colors::BLUE)
+                                    };
+                                    // right_to_left: first added sits rightmost.
+                                    if row_icon_button(ui, icons::DELETE, c_delete)
+                                        .on_hover_text("Delete (Shift+D)")
+                                        .clicked()
+                                    {
+                                        action.set(Some(RowAction::Delete(task.id)));
+                                        consumed = true;
+                                    }
+                                    if row_icon_button(ui, icons::STATUS_COMPLETED, c_complete)
+                                        .on_hover_text("Complete (d)")
+                                        .clicked()
+                                    {
+                                        action.set(Some(RowAction::Complete(task.id)));
+                                        consumed = true;
+                                    }
+                                    if row_icon_button(ui, icons::MODE_INSERT, c_edit)
+                                        .on_hover_text("Edit (e)")
+                                        .clicked()
+                                    {
+                                        action.set(Some(RowAction::Edit(task.id)));
+                                        consumed = true;
+                                    }
+                                } else if let Some(ref due) = task.due {
+                                    let due_color = if is_highlighted {
+                                        colors::MANTLE
+                                    } else {
+                                        due_date_color(due)
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(format_due_short(due))
+                                            .color(due_color)
+                                            .size(11.0),
+                                    );
                                 }
-                                if row_icon_button(ui, icons::STATUS_COMPLETED, c_complete)
-                                    .on_hover_text("Complete (d)")
-                                    .clicked()
-                                {
-                                    action.set(Some(RowAction::Complete(task.id)));
-                                    consumed = true;
-                                }
-                                if row_icon_button(ui, icons::MODE_INSERT, c_edit)
-                                    .on_hover_text("Edit (e)")
-                                    .clicked()
-                                {
-                                    action.set(Some(RowAction::Edit(task.id)));
-                                    consumed = true;
-                                }
-                            } else if let Some(ref due) = task.due {
-                                let due_color = if is_highlighted {
-                                    colors::MANTLE
-                                } else {
-                                    due_date_color(due)
-                                };
-                                ui.label(
-                                    egui::RichText::new(format_due_short(due))
-                                        .color(due_color)
-                                        .size(11.0),
-                                );
-                            }
+                            });
                             ui.with_layout(
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
@@ -1841,6 +1629,7 @@ fn task_table(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::view::task_card;
 
     fn task_with_order(order: u64) -> Task {
         Task {
@@ -2020,6 +1809,46 @@ mod tests {
         assert!(clashes.is_empty(), "id clashes on hover: {clashes:?}");
     }
 
+    /// Moving the pointer over rows in the full app must not change any widget's
+    /// id between frames. egui's debug build outlines such a rect in red (no
+    /// text), which flashed on every hover in / out when the hover icons
+    /// shifted the auto ids of the row's title section.
+    #[test]
+    fn hovering_rows_keeps_widget_ids_stable() {
+        use eframe::App;
+        let (mut app, _dir) = build_test_app(false);
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        let mut outlined = Vec::new();
+        for y in (60..200).step_by(8) {
+            for x in [30.0, 380.0] {
+                for _ in 0..3 {
+                    time += 0.25;
+                    let input = egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::pos2(0.0, 0.0),
+                            egui::vec2(500.0, 600.0),
+                        )),
+                        time: Some(time),
+                        events: vec![egui::Event::PointerMoved(egui::pos2(x, y as f32))],
+                        ..Default::default()
+                    };
+                    let mut frame = eframe::Frame::_new_kittest();
+                    let full = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+                    outlined.extend(full.shapes.iter().filter_map(|cs| match &cs.shape {
+                        egui::epaint::Shape::Rect(r)
+                            if r.stroke.color == egui::Color32::RED && r.stroke.width == 2.0 =>
+                        {
+                            Some(((x, y), r.rect))
+                        }
+                        _ => None,
+                    }));
+                }
+            }
+        }
+        assert!(outlined.is_empty(), "ids changed on hover at: {outlined:?}");
+    }
+
     /// Build a headless `FastTask` backed by a temp DB and pre-seeded with 4
     /// tasks. Skips `FastTask::default` and `ProjectManager::default` because both
     /// force-open the *real* database (and panic if it's locked by a running
@@ -2065,11 +1894,13 @@ mod tests {
                 show_detail_pane,
                 show_help: false,
                 always_on_top: false,
+                show_share: false,
                 init: false,
                 status_msg: None,
             },
             app_type: AppType::Native,
-            local_share: false,
+            share: None,
+            share_ui: Default::default(),
             err_ui: Default::default(),
             known_tags: Vec::new(),
             annotations: Vec::new(),
@@ -2537,6 +2368,196 @@ mod tests {
         assert_eq!(window(&app), "tasks", "Esc was spent on the banner");
     }
 
+    /// App with the share running on loopback and its popup open, in `pane`.
+    fn app_with_share_popup(
+        pane: crate::ui::app::WindowState,
+    ) -> (
+        crate::ui::app::FastTask,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let (mut app, dir) = build_test_app(false);
+        let share_dir = tempfile::TempDir::new().unwrap();
+        let db = crate::database::database::Db::open_path(share_dir.path().join("s.db")).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        app.share = Some(
+            crate::local_share::server::start_on(db, listener, std::sync::Arc::new(|| {})).unwrap(),
+        );
+        app.app_state.show_share = true;
+        app.app_state.window_state = pane;
+        (app, dir, share_dir)
+    }
+
+    #[test]
+    fn esc_closes_share_popup_without_changing_pane() {
+        use crate::ui::app::WindowState;
+        for (pane, name) in [(WindowState::Tasks, "tasks"), (WindowState::Info, "info")] {
+            let (mut app, _dir, _share_dir) = app_with_share_popup(pane);
+            press(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+            assert!(!app.app_state.show_share, "Esc closes the popup ({name})");
+            assert!(
+                app.share.is_some(),
+                "closing the popup keeps sharing ({name})"
+            );
+            assert_eq!(window(&app), name, "Esc was spent on the popup");
+        }
+    }
+
+    #[test]
+    fn share_popup_swallows_pane_keys_and_shift_w_stops() {
+        let (mut app, _dir, _share_dir) = app_with_share_popup(crate::ui::app::WindowState::Tasks);
+        press(&mut app, egui::Key::J, egui::Modifiers::NONE);
+        assert_eq!(
+            app.task_manager.current,
+            Some(0),
+            "j moved the cursor behind the popup"
+        );
+        press(&mut app, egui::Key::W, egui::Modifiers::SHIFT);
+        assert!(app.share.is_none(), "Shift+W stops sharing");
+        assert!(!app.app_state.show_share);
+    }
+
+    /// Re-sharing: with the popup closed, Shift+W shows the same link again
+    /// instead of stopping the share.
+    #[test]
+    fn shift_w_while_sharing_reopens_the_popup() {
+        let (mut app, _dir, _share_dir) = app_with_share_popup(crate::ui::app::WindowState::Tasks);
+        let url = app.share.as_ref().unwrap().url().to_string();
+        press(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.app_state.show_share);
+
+        press(&mut app, egui::Key::W, egui::Modifiers::SHIFT);
+        assert!(app.app_state.show_share, "Shift+W reopens the popup");
+        assert_eq!(
+            app.share.as_ref().map(|s| s.url().to_string()),
+            Some(url),
+            "same session, same link"
+        );
+    }
+
+    /// The share popup's name field keeps what you type (spaces included)
+    /// across frames, and saves it when the popup closes.
+    #[test]
+    fn share_popup_name_field_takes_two_word_names() {
+        let (app, dir, _share_dir) = app_with_share_popup(crate::ui::app::WindowState::Tasks);
+        let mut h = Harness {
+            ctx: egui::Context::default(),
+            app,
+            _dir: dir,
+        };
+        h.app.share_ui.show_settings = true; // the name field lives behind the gear
+        h.frame(vec![]);
+        h.ctx
+            .memory_mut(|m| m.request_focus(egui::Id::new("share_host_name")));
+        h.frame(vec![]);
+        // Clear whatever default is there, then type.
+        for _ in 0..40 {
+            h.frame(vec![egui::Event::Key {
+                key: egui::Key::Backspace,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        for ch in "Casey Smith".chars() {
+            h.frame(vec![egui::Event::Text(ch.to_string())]);
+        }
+        h.frame(vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        h.frame(vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        assert!(!h.app.app_state.show_share, "Esc closed the popup");
+        assert_eq!(
+            crate::ui::app::DB.share_settings().host_name.as_deref(),
+            Some("Casey Smith")
+        );
+    }
+
+    /// The share popup, with and without its settings column, draws no id
+    /// clashes (text overlay) or id changes (red outline).
+    #[test]
+    fn share_popup_renders_cleanly() {
+        for (width, settings) in [(900.0, false), (900.0, true), (360.0, false), (360.0, true)] {
+            let (app, dir, _share_dir) = app_with_share_popup(crate::ui::app::WindowState::Tasks);
+            let mut h = Harness {
+                ctx: egui::Context::default(),
+                app,
+                _dir: dir,
+            };
+            h.app.share_ui.show_settings = settings;
+            let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 700.0));
+            let mut problems = Vec::new();
+            for i in 0..4 {
+                use eframe::App;
+                let mut frame = eframe::Frame::_new_kittest();
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(i as f64 * 0.1),
+                    ..Default::default()
+                };
+                let app = &mut h.app;
+                let full = h.ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+                let mut texts = Vec::new();
+                for cs in &full.shapes {
+                    collect_text(&cs.shape, &mut texts);
+                    if let egui::epaint::Shape::Rect(r) = &cs.shape
+                        && r.stroke.color == egui::Color32::RED
+                        && r.stroke.width == 2.0
+                    {
+                        problems.push(format!("id changed at {:?}", r.rect));
+                    }
+                }
+                problems.extend(
+                    texts
+                        .into_iter()
+                        .filter(|t| t.contains("widget ID") || t.contains("use of")),
+                );
+            }
+            let popup = h
+                .ctx
+                .memory(|m| m.area_rect(egui::Id::new("share_popup")))
+                .expect("popup drawn");
+            assert!(
+                screen.contains_rect(popup),
+                "{width} wide, settings={settings}: popup {popup:?} runs off screen"
+            );
+            assert!(
+                problems.is_empty(),
+                "{width} wide, settings={settings}: {problems:?}"
+            );
+            assert!(h.app.app_state.show_share);
+        }
+    }
+
+    /// A browser edit refreshes the desktop but must not clear an editor
+    /// you're typing in (which `DbTransaction` would, via `writer.flush()`).
+    #[test]
+    fn remote_change_keeps_the_open_editor() {
+        let (mut app, _dir) = build_test_app(false);
+        app.app_state.mode = Mode::Insert(None);
+        app.app_state.window_state = crate::ui::app::WindowState::Info;
+        app.task_manager.writer.title_buffer = "half-typed".into();
+        app.annotation_task_id = Some(ObjectId::new());
+        app.backend_manager
+            .tx
+            .send(UpdateMessage::RemoteChange)
+            .unwrap();
+        press(&mut app, egui::Key::F13, egui::Modifiers::NONE);
+        assert_eq!(app.task_manager.writer.title_buffer, "half-typed");
+        assert_eq!(app.annotation_task_id, None, "notes are refetched");
+    }
+
     // --- tag completion (persistent Context so focus carries across frames) ---
 
     struct Harness {
@@ -2756,10 +2777,10 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        // Bulk path and single path share apply_status; completing twice must
+        // Bulk path and single path share set_status; completing twice must
         // not spawn a second occurrence.
-        apply_status(&backend, id, &TaskStatus::Completed).unwrap();
-        apply_status(&backend, id, &TaskStatus::Completed).unwrap();
+        backend.set_status(id, &TaskStatus::Completed).unwrap();
+        backend.set_status(id, &TaskStatus::Completed).unwrap();
         let all = backend
             .get_tasks(crate::database::ProjectEntry::All)
             .unwrap();

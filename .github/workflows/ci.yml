@@ -118,6 +118,13 @@ jobs:
       - name: Lint
         run: cargo clippy --all-features --all-targets -- -D warnings
 
+      # The LAN share's browser client: native clippy never compiles wasm-only code.
+      - name: Install wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Lint (wasm web client)
+        run: cargo clippy --target wasm32-unknown-unknown --lib --bins -- -D warnings
+
   # Required status check gate. The "Main" ruleset requires a check named "ci";
   # this job provides that context and passes only when both real jobs succeed.
   # `if: always()` guarantees it always reports (pass/fail) instead of getting

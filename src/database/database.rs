@@ -37,6 +37,34 @@ pub struct PersistedState {
     pub project_filter: ProjectEntry,
 }
 
+/// LAN share preferences. With `keep_link`, the token and port are reused on
+/// the next start, so a link handed out stays valid across app restarts until
+/// you make a new one.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ShareSettings {
+    #[serde(default)]
+    pub keep_link: bool,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Remembered only with `keep_link`; a fresh link always starts read-only.
+    #[serde(default)]
+    pub allow_edits: bool,
+    /// How browsers see the desktop's edits in the activity log.
+    #[serde(default)]
+    pub host_name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ShareSettingsDoc {
+    #[serde(rename = "_id")]
+    id: ObjectId,
+    settings: ShareSettings,
+}
+
+const SHARE_SETTINGS_ID: &str = "000000000000000000000002";
+
 #[derive(Clone)]
 pub struct Db {
     pub(crate) instance: polodb_core::Database,
@@ -52,6 +80,11 @@ pub struct Db {
     /// outermost call holds it for the whole operation. Shared by all clones.
     /// Lock order: this before `redo_stack`, never the reverse. Reads don't take it.
     write_lock: Arc<parking_lot::ReentrantMutex<()>>,
+    /// Bumped after every outermost write, so the local share server can push
+    /// "something changed" to browsers. Shared by all clones.
+    changes: Arc<tokio::sync::watch::Sender<u64>>,
+    /// Record the share activity log (see `activity.rs`). On while sharing.
+    pub(crate) activity_on: Arc<std::sync::atomic::AtomicBool>,
 }
 
 const RECENT_ID: &str = "000000000000000000000001";
@@ -61,6 +94,8 @@ impl Db {
         let db = Self {
             redo_stack: Arc::new(Mutex::new(Vec::new())),
             write_lock: Arc::new(parking_lot::ReentrantMutex::new(())),
+            changes: Arc::new(tokio::sync::watch::Sender::new(0)),
+            activity_on: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             instance: polodb_core::Database::open_path(path.as_ref())
                 .context("Failed to open DB")?,
         };
@@ -68,10 +103,29 @@ impl Db {
         Ok(db)
     }
 
-    /// Run `f` holding the write lock (see `write_lock`).
-    fn write<R>(&self, f: impl FnOnce() -> R) -> R {
-        let _guard = self.write_lock.lock();
-        f()
+    /// Run `f` holding the write lock (see `write_lock`). The outermost call
+    /// bumps `changes` once `f` returns, even on error — a spurious "changed"
+    /// only costs subscribers a refetch.
+    pub(crate) fn write<R>(&self, f: impl FnOnce() -> R) -> R {
+        let outermost = !self.write_lock.is_owned_by_current_thread();
+        let result = {
+            let _guard = self.write_lock.lock();
+            f()
+        };
+        if outermost {
+            self.notify_changed();
+        }
+        result
+    }
+
+    fn notify_changed(&self) {
+        self.changes.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// Receiver that wakes after each logical write. Starts with the current
+    /// value marked seen, so the first `changed()` waits for the next write.
+    pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 }
 
@@ -455,6 +509,35 @@ impl Db {
             id,
             project_filter: project,
         })?;
+        // Not a `write` (it runs on the UI thread and must not wait on the lock),
+        // but the share's web view follows the current project, so tell it.
+        self.notify_changed();
+        Ok(())
+    }
+
+    pub fn share_settings(&self) -> ShareSettings {
+        let Ok(id) = ObjectId::from_str(SHARE_SETTINGS_ID) else {
+            return ShareSettings::default();
+        };
+        self.instance
+            .collection::<ShareSettingsDoc>(APP_STATE)
+            .find_one(doc! { "_id": id })
+            .ok()
+            .flatten()
+            .map(|d| d.settings)
+            .unwrap_or_default()
+    }
+
+    /// Not a `write`: it's a preference, not data, and runs on the UI thread.
+    pub fn save_share_settings(&self, settings: &ShareSettings) -> anyhow::Result<()> {
+        let id = ObjectId::from_str(SHARE_SETTINGS_ID)?;
+        let col = self.instance.collection::<ShareSettingsDoc>(APP_STATE);
+        // PoloDB lacks upsert (see `save_current_project`).
+        col.delete_one(doc! { "_id": id })?;
+        col.insert_one(ShareSettingsDoc {
+            id,
+            settings: settings.clone(),
+        })?;
         Ok(())
     }
 
@@ -472,6 +555,7 @@ impl Db {
     }
     pub fn append_history(&self, event: Event) -> anyhow::Result<()> {
         self.write(|| {
+            self.log_activity(|| crate::database::activity::describe(&event));
             let record = HistoryRecord {
                 id: ObjectId::new(),
                 timestamp: bson::DateTime::now(),
@@ -551,6 +635,12 @@ impl Db {
                         }
                     },
                 }
+                self.log_activity(|| {
+                    crate::database::activity::describe_reversal(
+                        &event,
+                        crate::database::models::ActivityAction::Undid,
+                    )
+                });
                 self.redo_stack
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -623,6 +713,12 @@ impl Db {
                     },
                 }
 
+                self.log_activity(|| {
+                    crate::database::activity::describe_reversal(
+                        &event,
+                        crate::database::models::ActivityAction::Redid,
+                    )
+                });
                 // Push back to history without clearing the redo stack so chained redos work
                 let record = HistoryRecord {
                     id: ObjectId::new(),
@@ -648,20 +744,45 @@ impl Db {
     }
 
     pub fn add_annotation(&self, annotation: Annotation) -> anyhow::Result<ObjectId> {
-        Ok(self
-            .instance
-            .collection::<Annotation>(ANNOTATIONS_COLLECTION)
-            .insert_one(annotation)?
-            .inserted_id
-            .as_object_id()
-            .unwrap())
+        self.write(|| {
+            let (task_id, content) = (annotation.task_id, annotation.content.clone());
+            let id = self
+                .instance
+                .collection::<Annotation>(ANNOTATIONS_COLLECTION)
+                .insert_one(annotation)?
+                .inserted_id
+                .as_object_id()
+                .unwrap();
+            self.log_activity(|| {
+                let task = self.one_task(task_id).ok()??;
+                Some(crate::database::activity::note_change(
+                    crate::database::models::ActivityAction::Noted,
+                    &task.title,
+                    Some(&content),
+                ))
+            });
+            Ok(id)
+        })
     }
 
     pub fn delete_annotation(&self, annotation_id: ObjectId) -> anyhow::Result<()> {
-        self.instance
-            .collection::<Annotation>(ANNOTATIONS_COLLECTION)
-            .delete_one(doc! { "_id": annotation_id })?;
-        Ok(())
+        self.write(|| {
+            let col = self
+                .instance
+                .collection::<Annotation>(ANNOTATIONS_COLLECTION);
+            let note = col.find_one(doc! { "_id": annotation_id })?;
+            col.delete_one(doc! { "_id": annotation_id })?;
+            self.log_activity(|| {
+                let note = note?;
+                let task = self.one_task(note.task_id).ok()??;
+                Some(crate::database::activity::note_change(
+                    crate::database::models::ActivityAction::NoteDeleted,
+                    &task.title,
+                    Some(&note.content),
+                ))
+            });
+            Ok(())
+        })
     }
 
     pub fn load_history(&self) -> anyhow::Result<Vec<HistoryRecord>> {
@@ -788,6 +909,26 @@ mod tests {
             (t.title.as_str(), t.priority),
             ("new title", Priority::Urgent)
         );
+    }
+
+    #[test]
+    fn each_logical_write_bumps_changes_once() {
+        let (_dir, db) = test_db();
+        let rx = db.subscribe_changes();
+        let before = *rx.borrow();
+        // update_task nests upsert_tags + append_history under one outer write.
+        let id = db
+            .create_task(Task {
+                tags: Some(vec!["a".into()]),
+                ..make_task("t", None)
+            })
+            .unwrap();
+        assert_eq!(*rx.borrow(), before + 1);
+        db.modify_task(id, &mut |t| t.title = "u".into()).unwrap();
+        assert_eq!(*rx.borrow(), before + 2);
+        // Reads don't bump.
+        db.get_tasks(ProjectEntry::All).unwrap();
+        assert_eq!(*rx.borrow(), before + 2);
     }
 
     #[test]

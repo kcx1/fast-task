@@ -2,7 +2,10 @@ use crate::database::ProjectManagement;
 use crate::database::TagManagement;
 use crate::database::TaskManagement;
 use crate::ui::info::info_state;
-use crate::ui::keys::{set_mode, set_window_state, toggle_always_on_top, toggle_help, undo_redo};
+use crate::ui::keys::{
+    set_mode, set_window_state, share as share_key, toggle_activity, toggle_always_on_top,
+    toggle_help, undo_redo,
+};
 use crate::ui::theme;
 use std::fmt::Debug;
 use std::sync::LazyLock;
@@ -13,7 +16,6 @@ use polodb_core::bson::oid::ObjectId;
 
 use crate::database::database::Db;
 use crate::database::{Annotation, ProjectEntry, Task};
-use crate::local_share;
 use crate::ui::projects::{ProjectManager, project_state};
 use crate::ui::tasks::{TaskManager, get_tasks, task_state};
 use crate::ui::widgets::errors::{ErrorSeverity, ErrorUi};
@@ -72,7 +74,8 @@ pub struct FastTask {
     /// Reserved for item 11 (WASM/local share) and item 13 (cloud sync) branching.
     #[allow(dead_code)]
     pub app_type: AppType,
-    pub local_share: bool,
+    /// Running LAN share server (`Shift+W`); `None` when not sharing.
+    pub share: Option<crate::local_share::server::ShareHandle>,
     pub err_ui: ErrorUi,
     pub known_tags: Vec<String>,
     /// Annotations for the currently selected task.
@@ -85,6 +88,8 @@ pub struct FastTask {
     pub annotation_cursor: Option<usize>,
     /// Tag manager popup (`Shift+T`).
     pub tag_ui: crate::ui::tags::TagUi,
+    /// Share preferences and the activity side panel (`Shift+M`).
+    pub share_ui: crate::ui::share::ShareUi,
 }
 impl Default for FastTask {
     fn default() -> Self {
@@ -103,6 +108,7 @@ impl Default for FastTask {
                 show_detail_pane: false,
                 show_help: false,
                 always_on_top: false,
+                show_share: false,
                 init: true,
                 status_msg: None,
             },
@@ -118,13 +124,14 @@ impl Default for FastTask {
                 backend: std::sync::Arc::new(DB.clone()),
             },
             err_ui: Default::default(),
-            local_share: false,
+            share: None,
             known_tags: Vec::new(),
             annotations: Vec::new(),
             annotation_task_id: None,
             annotation_buf: String::new(),
             annotation_cursor: None,
             tag_ui: Default::default(),
+            share_ui: Default::default(),
             app_type,
         }
     }
@@ -137,6 +144,8 @@ pub struct AppState {
     pub show_detail_pane: bool,
     pub show_help: bool,
     pub always_on_top: bool,
+    /// Share popup (URL + QR code) is open.
+    pub show_share: bool,
     pub init: bool,
     /// Transient status-bar message with the instant it was set; clears after 3 s.
     pub status_msg: Option<(String, std::time::Instant)>,
@@ -163,6 +172,11 @@ pub enum UpdateMessage {
     Refresh,
     Undone,
     Redone,
+    /// A browser edited through the LAN share. Unlike `DbTransaction`, this must
+    /// not touch the editor — you may be mid-edit on the desktop.
+    RemoteChange,
+    /// The share activity log, newest first.
+    Activity(Vec<crate::database::models::ActivityEntry>),
 }
 
 pub struct BackendManager {
@@ -291,15 +305,14 @@ impl eframe::App for FastTask {
         // Update self from background thread results.
         self.thread_sync();
 
-        // Start the local share server on the false→true edge of `local_share`.
-        self.start_local_share();
-
         let mut dropdown_selected: Option<usize> = None;
         // Deferred so the panel closure only borrows `self` immutably; applied
         // after it returns (toggle needs `&mut self` for `refresh_tasks`).
         let mut new_sort: Option<crate::ui::tasks::SortOrder> = None;
         let mut toggle_completed = false;
         let mut open_tags = false;
+        let mut open_share = false;
+        let mut toggle_activity_panel = false;
 
         egui::Panel::top("Top Panel").show_inside(ui, |ui| {
             use crate::ui::tasks::SortOrder;
@@ -382,6 +395,36 @@ impl eframe::App for FastTask {
                 {
                     open_tags = true;
                 }
+
+                let sharing = self.share.is_some();
+                if ui
+                    .selectable_label(
+                        sharing,
+                        crate::ui::view::selectable_icon(icons::WEB, sharing),
+                    )
+                    .on_hover_text(if sharing {
+                        "Sharing on the local network — click for the link and QR code (Shift+W)"
+                    } else {
+                        "Share on the local network (Shift+W)"
+                    })
+                    .clicked()
+                {
+                    open_share = true;
+                }
+
+                if ui
+                    .selectable_label(
+                        self.share_ui.show_activity,
+                        crate::ui::view::selectable_icon(
+                            icons::ACTIVITY,
+                            self.share_ui.show_activity,
+                        ),
+                    )
+                    .on_hover_text("Activity: who changed what while sharing (Shift+M)")
+                    .clicked()
+                {
+                    toggle_activity_panel = true;
+                }
             });
         });
 
@@ -397,6 +440,12 @@ impl eframe::App for FastTask {
         }
         if open_tags {
             self.tag_ui.open(self.backend_manager.tx.clone());
+        }
+        if open_share {
+            self.share(ui.ctx());
+        }
+        if toggle_activity_panel {
+            self.toggle_activity();
         }
 
         // Status bar — always visible
@@ -483,6 +532,32 @@ impl eframe::App for FastTask {
                         .on_hover_text("Window pinned above all others (Shift+A to toggle)");
                     }
 
+                    if let Some(share) = &self.share {
+                        ui.separator();
+                        let resp = ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new(format!(
+                                        "{} shared @ {}{}",
+                                        icons::WEB,
+                                        share.display_addr(),
+                                        if share.allow_edits() {
+                                            " · edits on"
+                                        } else {
+                                            ""
+                                        }
+                                    ))
+                                    .color(colors::TEAL)
+                                    .size(11.0),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Click (or Shift+W) for the link and QR code");
+                        if resp.clicked() {
+                            self.app_state.show_share = true;
+                        }
+                    }
+
                     if crate::ui::bg::busy(std::time::Duration::from_millis(150)) {
                         ui.separator();
                         ui.add(egui::Spinner::new().size(11.0).color(colors::OVERLAY1))
@@ -532,6 +607,15 @@ impl eframe::App for FastTask {
                     .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)))
             });
         }
+        // Share popup: same ownership of the keyboard, so Esc closes it instead of
+        // changing pane and e.g. Shift+D can't delete a task behind it.
+        if self.app_state.show_share {
+            self.share_popup(ui);
+            ui.input_mut(|i| {
+                i.events
+                    .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)))
+            });
+        }
 
         if !ui.ctx().egui_wants_keyboard_input() {
             // Shift+T opens the tag manager from Normal mode.
@@ -550,6 +634,12 @@ impl eframe::App for FastTask {
             }
             if toggle_help(ui) {
                 self.app_state.show_help = !self.app_state.show_help;
+            }
+            if share_key(ui) {
+                self.share(ui.ctx());
+            }
+            if toggle_activity(ui) {
+                self.toggle_activity();
             }
             if toggle_always_on_top(ui) {
                 self.app_state.always_on_top = !self.app_state.always_on_top;
@@ -580,6 +670,9 @@ impl eframe::App for FastTask {
         // and the status-bar filter input have settled, before any pane reads the
         // cursor. Keeps real_index/get_current_task from rebuilding the list per call.
         self.task_manager.refresh_visible_cache();
+
+        // Activity sidecar on the right, before the pane claims the rest.
+        self.activity_panel(ui);
 
         // Handle the different window states
         match &self.app_state.window_state {
@@ -679,15 +772,6 @@ impl FastTask {
         }
     }
 
-    fn start_local_share(&self) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        if self.local_share {
-            runtime.spawn(async {
-                local_share::server::start_server();
-            });
-        }
-    }
-
     fn thread_sync(&mut self) {
         while let Ok(message) = self.backend_manager.rx.try_recv() {
             match message {
@@ -735,6 +819,15 @@ impl FastTask {
                 }
                 UpdateMessage::Error(e) => {
                     ErrorUi::push(&mut self.err_ui, e, ErrorSeverity::NonFatal);
+                }
+                UpdateMessage::Activity(entries) => {
+                    self.share_ui.activity = entries;
+                }
+                UpdateMessage::RemoteChange => {
+                    self.refresh_tasks();
+                    self.refresh_tags();
+                    // Re-fetch the open task's notes; a browser may have added one.
+                    self.annotation_task_id = None;
                 }
                 UpdateMessage::Undone => {
                     self.app_state.status_msg =
@@ -810,6 +903,11 @@ fn show_help_popup(ctx: &egui::Context, mode: &Mode, window: &WindowState, show:
             ("Shift+K", "Toggle detail pane"),
             ("Shift+C", "Show / hide completed tasks"),
             ("Shift+A", "Toggle always-on-top"),
+            (
+                "Shift+W",
+                "Share on the local network / show the link + QR code again",
+            ),
+            ("Shift+M", "Show / hide the share activity log"),
             ("Shift+T", "Manage tags (new / rename / delete)"),
             (
                 "Shift+H / Shift+L",

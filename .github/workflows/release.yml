@@ -97,6 +97,16 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Build the LAN share's web client first; the release binary embeds it.
+      - name: Build web client
+        shell: bash
+        run: |
+          rustup target add wasm32-unknown-unknown
+          version=$(cargo metadata --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version')
+          cargo install wasm-bindgen-cli --version "$version" --locked
+          scripts/build-web.sh
+
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: fast-task

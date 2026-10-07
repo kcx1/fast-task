@@ -39,6 +39,7 @@ pub fn details_view(ui: &mut egui::Ui, details: &str, code: bool, language: Opti
 /// Multiline editor for details. With a language set, text is highlighted live as
 /// you type. Shift+Enter inserts a newline (plain Enter saves the form), matching
 /// the plain-text editor.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn details_editor(
     ui: &mut egui::Ui,
     buf: &mut String,

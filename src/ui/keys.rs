@@ -12,6 +12,17 @@ pub fn toggle_always_on_top(ui: &egui::Ui) -> bool {
     ui.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::A))
 }
 
+/// Returns true when the user pressed `Shift+M` to show / hide the activity log.
+pub fn toggle_activity(ui: &egui::Ui) -> bool {
+    ui.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::M))
+}
+
+/// Returns true when the user pressed `Shift+W`: start the LAN share, or show
+/// its link + QR code again if it's running.
+pub fn share(ui: &egui::Ui) -> bool {
+    ui.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::W))
+}
+
 /// Returns the new `WindowState` triggered by a global nav key, if any.
 ///
 /// - `t` jumps to Tasks; `Esc` from any other pane returns to Tasks.
