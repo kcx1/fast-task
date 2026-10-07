@@ -18,6 +18,7 @@ pub fn field_label(ui: &mut Ui, text: impl Into<String>) -> Response {
 }
 
 /// Primary action button (filled, accent color).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn primary_button(ui: &mut Ui, text: impl ToString) -> Response {
     let label = egui::RichText::new(text.to_string())
         .color(colors::MANTLE)
@@ -48,21 +49,83 @@ pub fn danger_button(ui: &mut Ui, text: impl Into<WidgetText>) -> Response {
 /// Render a small colored status badge. The symbol is icon-only, so a hover
 /// tooltip names the status for anyone who doesn't recognize the glyph.
 pub fn status_badge(ui: &mut Ui, status: &crate::database::models::TaskStatus) {
-    use crate::database::models::TaskStatus;
-    use crate::ui::theme::icons;
-    let symbol = match status {
-        TaskStatus::NotStarted => icons::STATUS_NOT_STARTED,
-        TaskStatus::InProgress => icons::STATUS_IN_PROGRESS,
-        TaskStatus::Completed => icons::STATUS_COMPLETED,
-        TaskStatus::OnHold => icons::STATUS_ON_HOLD,
-    };
-    let name = match status {
-        TaskStatus::NotStarted => "Not started",
-        TaskStatus::InProgress => "In progress",
-        TaskStatus::Completed => "Completed",
-        TaskStatus::OnHold => "On hold",
-    };
+    use crate::ui::view::{status_icon, status_name};
     let color = crate::ui::theme::status_color(status);
-    ui.label(RichText::new(symbol).color(color))
-        .on_hover_text(name);
+    ui.label(RichText::new(status_icon(status)).color(color))
+        .on_hover_text(status_name(status));
+}
+
+/// A one-line text field with an "Add" button after it; true when the text
+/// should be added (button, or Enter in the field).
+///
+/// The row is exactly one line tall and the field takes exactly the width the
+/// button leaves. Guessing the button's width instead overflowed the row, and
+/// inside a resizable panel that re-sized the panel every frame; laying it out
+/// right to left without a fixed height centered it in all the space below.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn add_row(ui: &mut Ui, buf: &mut String, hint_text: &str) -> bool {
+    let height = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(ui.text_style_height(&egui::TextStyle::Button))
+        + 2.0 * ui.spacing().button_padding.y;
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), height),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            let clicked = secondary_button(ui, "Add").clicked();
+            let resp = ui.add(
+                egui::TextEdit::singleline(buf)
+                    .hint_text(hint_text)
+                    .desired_width(ui.available_width()),
+            );
+            clicked || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+        },
+    )
+    .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// In a tall resizable side panel (the browser's task list) the row stays
+    /// one line high at the top, and the panel keeps its width frame to frame.
+    #[test]
+    fn add_row_is_one_line_and_does_not_resize_its_panel() {
+        let ctx = egui::Context::default();
+        let mut buf = String::new();
+        let (mut widths, mut rows) = (Vec::new(), Vec::new());
+        for _ in 0..30 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(1000.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let panel = egui::Panel::left("list")
+                    .resizable(true)
+                    .default_size(360.0)
+                    .show_inside(ui, |ui| {
+                        let top = ui.cursor().top();
+                        add_row(ui, &mut buf, "Add a task…");
+                        rows.push((top, ui.cursor().top()));
+                    });
+                widths.push(panel.response.rect.width());
+            });
+        }
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "panel width drifts: {widths:?}"
+        );
+        let (top, after) = *rows.last().unwrap();
+        assert!(
+            after - top < 40.0,
+            "row is {} tall, not one line",
+            after - top
+        );
+    }
 }

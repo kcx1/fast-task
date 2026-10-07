@@ -3,26 +3,18 @@ use polodb_core::bson::oid::ObjectId;
 
 use crate::database::models::{Annotation, Priority, Recurrence, TaskStatus};
 use crate::ui::app::{DB, EditFocus, FastTask, Mode, UpdateMessage, WindowState};
-use crate::ui::tasks::{
-    TaskWriter, due_date_color, format_due_short, task_submit_create, task_submit_edit,
-};
+use crate::ui::tasks::{TaskWriter, task_submit_create, task_submit_edit};
 use crate::ui::theme::colors;
-use crate::ui::widgets::common;
+use crate::ui::view::{due_date_color, format_due_short};
 
-/// Formats an annotation timestamp as "Jun 2, 14:03" in local time.
-fn format_annotation_ts(dt: &polodb_core::bson::DateTime) -> String {
-    let Ok(ts) = jiff::Timestamp::from_millisecond(dt.timestamp_millis()) else {
-        return String::new();
-    };
-    let z = ts.to_zoned(jiff::tz::TimeZone::system());
-    let month = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ]
-    .get((z.month() as usize).saturating_sub(1))
-    .copied()
-    .unwrap_or("?");
-    format!("{} {}, {:02}:{:02}", month, z.day(), z.hour(), z.minute())
+/// On the desktop a note shows its author only when it has one (written from
+/// a browser); desktop notes have none, and nobody is asked for a name here.
+fn note_author(author: &Option<String>) -> Option<(String, egui::Color32)> {
+    author
+        .as_ref()
+        .map(|name| (name.clone(), crate::ui::view::person_color(name)))
 }
+use crate::ui::widgets::common;
 
 /// Renders a date-entry row: free-text field + calendar picker + optional clear button.
 /// Updates `*date` and clears `text_buf` when the picker fires.
@@ -34,8 +26,9 @@ fn date_field(
     id_salt: &str,
     confirmed_text: impl Fn(&polodb_core::bson::DateTime) -> (String, egui::Color32),
 ) {
-    use crate::ui::tasks::{bson_dt_to_jiff_date, from_jiff_to_datetime};
+    use crate::ui::tasks::from_jiff_to_datetime;
     use crate::ui::theme::colors;
+    use crate::ui::view::bson_dt_to_jiff_date;
     use crate::ui::widgets::common;
 
     ui.horizontal(|ui| {
@@ -192,7 +185,7 @@ pub fn info_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
                             );
                         });
                         ui.add_space(4.0);
-                        crate::ui::tasks::task_card(ui, &task);
+                        crate::ui::view::task_card(ui, &task);
 
                         ui.add_space(8.0);
                         ui.separator();
@@ -247,7 +240,7 @@ pub fn info_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
                         };
                         egui::ScrollArea::vertical()
                             .id_salt("annotations_scroll")
-                            .max_height(180.0)
+                            .max_height(240.0)
                             .show(ui, |ui| {
                                 if app.annotations.is_empty() {
                                     ui.label(
@@ -259,31 +252,19 @@ pub fn info_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
                                 }
                                 for (idx, ann) in app.annotations.iter().enumerate() {
                                     let highlighted = app.annotation_cursor == Some(idx);
-                                    ui.horizontal(|ui| {
-                                        let ts = format_annotation_ts(&ann.created_at);
-                                        let (ts, ts_color) = if highlighted {
-                                            (format!("▸ {ts}"), colors::BLUE)
-                                        } else {
-                                            (ts, colors::SUBTEXT0)
-                                        };
-                                        let ts_resp = ui.label(
-                                            egui::RichText::new(ts).color(ts_color).size(11.0),
-                                        );
-                                        if highlighted && (key_down || key_up) {
-                                            ts_resp.scroll_to_me(None);
-                                        }
-                                        if common::secondary_button(
-                                            ui,
-                                            crate::ui::theme::icons::DISCARD,
-                                        )
-                                        .on_hover_text("Delete note (x)")
-                                        .clicked()
-                                        {
-                                            to_delete = Some(ann.id);
-                                        }
-                                    });
-                                    ui.label(egui::RichText::new(&ann.content).size(12.0));
-                                    ui.add_space(4.0);
+                                    let card = crate::ui::view::note_card(
+                                        ui,
+                                        ann,
+                                        note_author(&ann.author),
+                                        highlighted,
+                                        true,
+                                    );
+                                    if highlighted && (key_down || key_up) {
+                                        card.response.scroll_to_me(None);
+                                    }
+                                    if card.delete {
+                                        to_delete = Some(ann.id);
+                                    }
                                 }
                             });
 
@@ -333,6 +314,7 @@ pub fn info_state(ui: &mut egui::Ui, app: &mut FastTask) -> InnerResponse<()> {
                                 task_id: task.id,
                                 content: std::mem::take(&mut app.annotation_buf),
                                 created_at: polodb_core::bson::DateTime::now(),
+                                author: None,
                             };
                             let task_id = task.id;
                             let tx = app.backend_manager.tx.clone();
@@ -658,24 +640,7 @@ fn info_editor(ui: &mut egui::Ui, app: &mut FastTask) {
                     ui.add_space(8.0);
                     common::field_label(ui, "Notes")
                         .on_hover_text("Timestamped log for this task (separate from Details)");
-                    if app.annotations.is_empty() {
-                        ui.label(
-                            egui::RichText::new("No notes yet.")
-                                .color(colors::OVERLAY1)
-                                .italics()
-                                .size(11.0),
-                        );
-                    }
-                    for ann in &app.annotations {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(
-                                egui::RichText::new(format_annotation_ts(&ann.created_at))
-                                    .color(colors::SUBTEXT0)
-                                    .size(11.0),
-                            );
-                            ui.label(egui::RichText::new(&ann.content).size(12.0));
-                        });
-                    }
+                    crate::ui::view::notes_list(ui, &app.annotations, note_author);
                     ui.label(
                         egui::RichText::new(
                             "Notes are added in the Info pane: Enter on a task, then a.",

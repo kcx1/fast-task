@@ -51,6 +51,16 @@ pub mod icons {
 
     pub const PIN: &str = "\u{F0231}"; // nf-md-pin
     pub const TAG: &str = "\u{F04F9}"; // nf-md-tag
+    pub const WEB: &str = "\u{F059F}"; // nf-md-web
+    pub const ACTIVITY: &str = "\u{F02DA}"; // nf-md-history
+    pub const SETTINGS: &str = "\u{F0493}"; // nf-md-cog
+    pub const REFRESH: &str = "\u{F0450}"; // nf-md-refresh
+    pub const CHECK: &str = "\u{F012C}"; // nf-md-check
+    pub const CLOSE: &str = "\u{F0156}"; // nf-md-close
+    pub const MOVE: &str = "\u{F04E1}"; // nf-md-swap_vertical
+    pub const NOTE: &str = "\u{F039E}"; // nf-md-note_text
+    pub const UNDO: &str = "\u{F054C}"; // nf-md-undo
+    pub const REDO: &str = "\u{F044E}"; // nf-md-redo
 }
 
 /// Apply the Catppuccin Macchiato theme. Call once on app startup.
@@ -188,5 +198,59 @@ pub fn priority_color(priority: &crate::database::models::Priority) -> Color32 {
         Priority::Urgent => colors::RED,
         Priority::Normal => colors::TEXT,
         Priority::Low => colors::SUBTEXT0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every icon and symbol the UI draws exists in the bundled fonts. A missing
+    /// one renders as an empty box ("□") — the live indicator's "●" did, and
+    /// read as "not connected".
+    #[test]
+    fn every_icon_is_in_the_fonts() {
+        use super::icons::*;
+        let ctx = egui::Context::default();
+        super::apply(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let used = [
+            STATUS_NOT_STARTED,
+            STATUS_IN_PROGRESS,
+            STATUS_ON_HOLD,
+            STATUS_COMPLETED,
+            PRIORITY_URGENT,
+            PRIORITY_LOW,
+            SAVE,
+            DISCARD,
+            DELETE,
+            NEW,
+            MODE_NORMAL,
+            MODE_INSERT,
+            MODE_VISUAL,
+            PIN,
+            TAG,
+            WEB,
+            ACTIVITY,
+            SETTINGS,
+            REFRESH,
+            CHECK,
+            CLOSE,
+            MOVE,
+            NOTE,
+            UNDO,
+            REDO,
+            // Plain-text symbols used in labels.
+            "‹",
+            "…",
+            "“",
+            "”",
+            "·",
+        ];
+        let missing: Vec<_> = used
+            .iter()
+            .flat_map(|s| s.chars())
+            .filter(|&c| !ctx.fonts_mut(|f| f.has_glyph(&egui::FontId::proportional(13.0), c)))
+            .map(|c| format!("U+{:04X} {c}", c as u32))
+            .collect();
+        assert!(missing.is_empty(), "missing from the fonts: {missing:?}");
     }
 }

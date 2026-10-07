@@ -190,9 +190,12 @@ impl ErrorUi {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if common::secondary_button(ui, "✕")
-                                            .on_hover_text("Dismiss (Esc)")
-                                            .clicked()
+                                        if common::secondary_button(
+                                            ui,
+                                            crate::ui::theme::icons::CLOSE,
+                                        )
+                                        .on_hover_text("Dismiss (Esc)")
+                                        .clicked()
                                         {
                                             to_remove.push(i);
                                         }

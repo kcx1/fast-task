@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
-use polodb_core::bson::{self, Document};
-use polodb_core::bson::{Bson, DateTime, doc, oid::ObjectId};
+use bson::Document;
+use bson::{Bson, DateTime, doc, oid::ObjectId};
 use serde::{Deserialize, Serialize};
 
 /// A named container for tasks. `tags` is reserved for future filtering.
@@ -140,6 +140,54 @@ impl Task {
     pub fn get_next_gap(&self) -> u64 {
         self.order + ORDER_GAP
     }
+
+    /// The next instance of a recurring task, due one period after its due date
+    /// (or today, if it has none). `None` if it doesn't recur.
+    pub fn next_occurrence(&self) -> Option<Task> {
+        let recurrence = self.recurrence.as_ref()?;
+        let base = self
+            .due
+            .as_ref()
+            .and_then(bson_dt_to_jiff_date)
+            .unwrap_or_else(|| jiff::Zoned::now().date());
+        let span = match recurrence {
+            Recurrence::Daily => jiff::Span::new().days(1i64),
+            Recurrence::Weekly => jiff::Span::new().weeks(1i64),
+            Recurrence::Monthly => jiff::Span::new().months(1i64),
+            Recurrence::Yearly => jiff::Span::new().years(1i64),
+        };
+        let next_date = base.checked_add(span).ok()?;
+        Some(Task {
+            title: self.title.clone(),
+            details: self.details.clone(),
+            priority: self.priority.clone(),
+            tags: self.tags.clone(),
+            code: self.code,
+            language: self.language,
+            project_id: self.project_id,
+            recurrence: self.recurrence.clone(),
+            wait_until: self.wait_until,
+            due: from_jiff_to_datetime(next_date),
+            order: self.get_next_gap(),
+            ..Default::default()
+        })
+    }
+}
+
+/// Converts a BSON `DateTime` to a `jiff` civil date in UTC.
+pub fn bson_dt_to_jiff_date(dt: &DateTime) -> Option<jiff::civil::Date> {
+    let ts = jiff::Timestamp::from_millisecond(dt.timestamp_millis()).ok()?;
+    Some(ts.to_zoned(jiff::tz::TimeZone::UTC).date())
+}
+
+/// Converts a `jiff` civil date to a BSON `DateTime` at midnight UTC.
+pub fn from_jiff_to_datetime(dt: jiff::civil::Date) -> Option<DateTime> {
+    DateTime::builder()
+        .year(dt.year() as i32)
+        .month(dt.month() as u8)
+        .day(dt.day() as u8)
+        .build()
+        .ok()
 }
 
 impl Default for Task {
@@ -282,6 +330,10 @@ pub struct Annotation {
     pub task_id: ObjectId,
     pub content: String,
     pub created_at: DateTime,
+    /// Who wrote it, when known: browser notes carry the editor's name;
+    /// desktop notes don't (nobody is asked for a name there).
+    #[serde(default)]
+    pub author: Option<String>,
 }
 
 /// A single normalized tag stored in the tags collection.
@@ -293,5 +345,68 @@ pub struct Tag {
 impl Display for Tag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.content)
+    }
+}
+
+/// One line of the LAN share's activity log (see `database::activity`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ActivityEntry {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    pub at: DateTime,
+    /// The browser user's name; `None` for the desktop.
+    pub who: Option<String>,
+    /// The whole change as one sentence, e.g. `completed “Fix the tap”`. Entries
+    /// from before `action` existed have only this.
+    pub what: String,
+    /// The kind of change, for the log's colored chip.
+    #[serde(default)]
+    pub action: Option<ActivityAction>,
+    /// What it happened to — usually a task title.
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// Anything else worth a line, e.g. the old title or the note's text.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+/// The kinds of change the activity log shows.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityAction {
+    Added,
+    Completed,
+    Started,
+    Reopened,
+    OnHold,
+    Renamed,
+    Edited,
+    Priority,
+    Moved,
+    Deleted,
+    Noted,
+    NoteDeleted,
+    Undid,
+    Redid,
+}
+
+impl ActivityAction {
+    /// Past-tense verb for the one-line sentence (`what`).
+    pub fn verb(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Completed => "completed",
+            Self::Started => "started",
+            Self::Reopened => "reopened",
+            Self::OnHold => "put on hold",
+            Self::Renamed => "renamed",
+            Self::Edited => "edited",
+            Self::Priority => "changed the priority of",
+            Self::Moved => "moved",
+            Self::Deleted => "deleted",
+            Self::Noted => "added a note to",
+            Self::NoteDeleted => "deleted a note on",
+            Self::Undid => "undid a change to",
+            Self::Redid => "redid a change to",
+        }
     }
 }
