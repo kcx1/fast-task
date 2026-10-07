@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4-alpha-001] - 2026-10-07
+### :sparkles: New Features
+- [`d7496e8`](https://github.com/kcx1/fast-task/commit/d7496e83d0101988a286b5553c80aa89e76738ee) - local web share *(PR [#29](https://github.com/kcx1/fast-task/pull/29) by [@kcx1](https://github.com/kcx1))*
+
+
 ## [v0.3-alpha-001] - 2026-09-24
 ### :sparkles: New Features
 - [`a09bf86`](https://github.com/kcx1/fast-task/commit/a09bf86a13860aa9872aa42f1328a39e3bbcbc80) - keyboard pass — pane nav, paste, and missing keybinds *(PR [#19](https://github.com/kcx1/fast-task/pull/19) by [@kcx1](https://github.com/kcx1))*
@@ -22,3 +27,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [v0.2-alpha]: https://github.com/kcx1/fast-task/compare/v0.1-alpha...v0.2-alpha
 [v0.3-alpha-001]: https://github.com/kcx1/fast-task/compare/v0.2-alpha-001...v0.3-alpha-001
+[v0.4-alpha-001]: https://github.com/kcx1/fast-task/compare/v0.3-alpha-001...v0.4-alpha-001
