@@ -16,9 +16,17 @@ jobs:
   create-release:
     runs-on: ubuntu-latest
     steps:
+      - name: Get changelog bot token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.CHANGELOG_APP_ID }}
+          private-key: ${{ secrets.CHANGELOG_APP_PRIVATE_KEY }}
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Update CHANGELOG
         id: changelog
@@ -44,25 +52,28 @@ jobs:
         with:
           branch: chore/changelog-${{ github.ref_name }}
           create_branch: true
-          commit_message: 'docs: update CHANGELOG.md for ${{ github.ref_name }} [skip ci]'
+          commit_message: 'docs: update CHANGELOG.md for ${{ github.ref_name }}'
           file_pattern: CHANGELOG.md
 
       - name: Open and merge changelog PR
         if: steps.commit-changelog.outputs.changes_detected == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: chore/changelog-${{ github.ref_name }}
         run: |
-          gh pr create \
-            --repo "${{ github.repository }}" \
-            --base main \
-            --head "chore/changelog-${{ github.ref_name }}" \
-            --title "docs: update CHANGELOG.md for ${{ github.ref_name }}" \
-            --body "Automated changelog update for ${{ github.ref_name }}."
+          if [ -z "$(gh pr list --repo "${{ github.repository }}" --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create \
+              --repo "${{ github.repository }}" \
+              --base main \
+              --head "$BRANCH" \
+              --title "docs: update CHANGELOG.md for ${{ github.ref_name }}" \
+              --body "Automated changelog update for ${{ github.ref_name }}."
+          fi
+          gh pr merge "$BRANCH" --repo "${{ github.repository }}" --squash --delete-branch --auto
 
-          gh pr merge \
-            --repo "${{ github.repository }}" \
-            "chore/changelog-${{ github.ref_name }}" \
-            --squash --delete-branch
+      - name: Clean up changelog branch on failure
+        if: failure() && steps.commit-changelog.outputs.changes_detected == 'true'
+        run: git push origin --delete "chore/changelog-${{ github.ref_name }}" || true
 
   upload-assets:
     needs: create-release
@@ -80,7 +91,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux system dependenc
+      - name: Install Linux system dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
@@ -91,7 +102,6 @@ jobs:
             libxcb-xfixes0-dev \
             libxkbcommon-dev \
             libssl-dev
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
